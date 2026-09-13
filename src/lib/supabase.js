@@ -3,7 +3,9 @@
 // ═══════════════════════════════════════════════════════════════════
 //
 // SETUP (one-time, ~5 minutes):
-//   1) Uses the SAME Supabase project as the TENNIS tracker (tennis-betting).
+//   1) Uses the FOOTBALL-BETTING Supabase project (dtmnpveiyvjotpotibdv).
+//      Moved here 2026-09-13: the tennis-betting project wedged (DB unreachable
+//      while the dashboard still said ACTIVE_HEALTHY) and took NFL down with it.
 //   2) Open that project's SQL Editor and paste in nfl_setup.sql (in the
 //      NFL folder). It creates the
 //      nfl_bets / nfl_staged_bets tables and the calc view.
@@ -16,8 +18,8 @@
 
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm'
 
-const SUPABASE_URL = 'https://coyamzthjdcpogxvzfea.supabase.co'
-const SUPABASE_KEY = 'sb_publishable_R8x9bfyktMP1DHrHnVLI8g_lGk7aZYh'
+const SUPABASE_URL = 'https://dtmnpveiyvjotpotibdv.supabase.co'
+const SUPABASE_KEY = 'sb_publishable_9IEe7t4ueVybhzyswyr-Xw_jijWSF8Q'
 
 const isConfigured =
   SUPABASE_URL && SUPABASE_KEY &&
