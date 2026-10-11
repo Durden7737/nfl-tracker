@@ -2203,6 +2203,34 @@ const TIPSTER_SEED_FLAG = 'nfl_tipster_seed_v1'
 const UNIT_COP = 5000
 const BOOKMAKERS = ['RushBet', 'Bwin', 'Betsson', 'Betano']
 
+// ── IMPORT SETTINGS (AI fallback model, FX rates, caches) ─────────
+// Text fallback defaults to Haiku (cheap, fast, no web search). Screenshots
+// default to Sonnet because vision quality matters more there. Both are
+// user-configurable from the Import page and stored next to the API key.
+const IMPORT_MODEL_TEXT_KEY   = 'nfl_importModelText'
+const IMPORT_MODEL_IMAGE_KEY  = 'nfl_importModelImage'
+const IMPORT_MODEL_DEFAULT_TEXT  = 'claude-haiku-4-5'
+const IMPORT_MODEL_DEFAULT_IMAGE = 'claude-sonnet-4-6'
+const IMPORT_MODEL_OPTIONS = ['claude-haiku-4-5', 'claude-sonnet-4-6', 'claude-opus-4-1']
+const FX_STORAGE_KEY        = 'nfl_fx'              // { USD: 4100, EUR: 4500, ... } COP per 1 unit
+const PARSE_CACHE_KEY       = 'nfl_parseCache_v1'   // sha256 → { bets, ts }
+const PARSE_CACHE_MAX       = 40
+const EXTRACTED_SESSION_KEY = 'nfl_extractedBets_v1'
+const PAGE_SESSION_KEY      = 'nfl_currentPage_v1'
+const AI_TIMEOUT_MS         = 60000
+function getImportModel(kind) {
+  try {
+    const v = localStorage.getItem(kind === 'image' ? IMPORT_MODEL_IMAGE_KEY : IMPORT_MODEL_TEXT_KEY)
+    if (v && v.trim()) return v.trim()
+  } catch {}
+  return kind === 'image' ? IMPORT_MODEL_DEFAULT_IMAGE : IMPORT_MODEL_DEFAULT_TEXT
+}
+function loadFxRates() {
+  try { const o = JSON.parse(localStorage.getItem(FX_STORAGE_KEY) || '{}'); return o && typeof o === 'object' ? o : {} }
+  catch { return {} }
+}
+function saveFxRates(obj) { try { localStorage.setItem(FX_STORAGE_KEY, JSON.stringify(obj)) } catch {} }
+
 // YYYY-MM-DD in the user's *local* timezone (unlike toISOString which is UTC).
 // Used anywhere we want today's calendar date in Colombia, not a UTC-shifted one.
 function todayLocalISO() {
@@ -2229,6 +2257,22 @@ let pendingSearch = ''
 let pendingMatchFilter = ''  // exact match_name, '' = all
 let extractedBets = []
 let editingExtractedIndex = null
+let extractedBatchDuplicatesOk = false   // "include duplicates" toggle on Send all
+let parseInFlight = false                // guards Parse Text / Extract against double-clicks
+let stagingInFlight = false              // guards Send / Send all against double-clicks
+let _cidCounter = 0
+function nextCid() { return `c${Date.now().toString(36)}${(++_cidCounter).toString(36)}` }
+// Cards you already paid for (or parsed) survive a tab reload — iOS Safari
+// discards background tabs, and a redeploy reloads the page.
+function persistExtractedBets() {
+  try { sessionStorage.setItem(EXTRACTED_SESSION_KEY, JSON.stringify(extractedBets)) } catch {}
+}
+function restoreExtractedBets() {
+  try {
+    const arr = JSON.parse(sessionStorage.getItem(EXTRACTED_SESSION_KEY) || '[]')
+    if (Array.isArray(arr)) extractedBets = arr.map(b => ({ ...b, _cid: b._cid || nextCid() }))
+  } catch { extractedBets = [] }
+}
 let trackingMode = 'full'
 let screenshotFiles = []
 let skipStaging = (function () {
@@ -2469,14 +2513,25 @@ function extractedToStagedPayload(b, source) {
         odds:        l.odds || '',
       })))
     : (b.pick || '')
-  const isTracking = b.bet_type === TRACKING_TYPE ||
-                     (b.stake == null && (b.odds == null || b.odds === 0 || b.odds === 1))
-  const origOdds = isPar && b.odds == null
-    ? b.legs.reduce((a, l) => a * (Number(l.odds) || 1), 1)
-    : (b.odds != null ? Number(b.odds) : null)
+  // Tracking-only is EXPLICIT: the Import checkbox (which sets bet_type to
+  // TRACKING_TYPE) or an explicit tracking bet_type. A missing stake, or odds
+  // of 1 (e.g. fractional "1/1" mis-parsed), must never flip a bet to tracking.
+  const isTracking = b.bet_type === TRACKING_TYPE
+  const legOdds = isPar ? b.legs.map(l => Number(l.odds)) : []
+  const origOdds = b.odds != null && Number(b.odds) >= 1
+    ? Number(b.odds)
+    : (isPar && legOdds.length && legOdds.every(n => n > 1) ? Math.round(legOdds.reduce((a, n) => a * n, 1) * 100) / 100 : null)
+  // Stake: units × UNIT_COP, or a COP / FX-converted amount. Never Number(b.stake)
+  // on a unit value. Original text stays in notes (the parser already put it there).
+  const units    = b.units != null && Number(b.units) > 0 ? Number(b.units) : null
+  const stakeCop = isTracking ? null
+                 : (b.stake_cop != null ? Number(b.stake_cop)
+                 : (units != null ? Math.round(units * UNIT_COP)
+                 : (b.stake != null && b.units == null && b.stake_currency == null ? Number(b.stake) : null)))
+  const legResults = isPar && Array.isArray(b.leg_results) && b.leg_results.length === b.legs.length ? b.leg_results : null
   const payload = {
     source:           source,
-    date:             b.date || new Date().toISOString().slice(0, 10),
+    date:             (b.date && /^\d{4}-\d{2}-\d{2}$/.test(b.date)) ? b.date : todayLocalISO(),
     competition:      b.competition || null,
     competition_type: b.competition_type || null,
     region:           b.region || null,
@@ -2486,14 +2541,19 @@ function extractedToStagedPayload(b, source) {
     bet_type:         b.bet_type || (isPar ? 'Parlay' : null),
     tipster:          b.tipster || null,
     original_odds:    origOdds,
-    original_stake:   b.stake != null ? Number(b.stake) : null,
+    original_stake:   stakeCop,
     odds:             origOdds,
-    stake_cop:        b.stake != null ? Number(b.stake) : null,
-    units:            null,
+    stake_cop:        stakeCop,
+    units:            isTracking ? null : units,
+    stake_amount:     b.stake_amount != null ? Number(b.stake_amount) : null,
+    stake_currency:   b.stake_currency || null,
     bookmaker:        null,
     date_placed:      todayLocalISO(),
     notes:            b.notes || null,
     tracking_only:    !!isTracking,
+    result:           b.result === 'won' || b.result === 'lost' || b.result === 'void' ? b.result : null,
+    leg_results:      legResults,
+    dedupe_key:       extractedDedupeKey({ ...b, date: (b.date && /^\d{4}-\d{2}-\d{2}$/.test(b.date)) ? b.date : todayLocalISO() }),
   }
   // Snapshot the imported values so the per-card "↺ Reset" button can
   // restore every editable field. Stored as jsonb in Supabase.
@@ -2508,7 +2568,7 @@ function manualBetToStagedPayload(p) {
   const isTracking = p.bet_type === TRACKING_TYPE
   const payload = {
     source:           'manual',
-    date:             p.date || new Date().toISOString().slice(0, 10),
+    date:             p.date || todayLocalISO(),
     competition:      p.competition || null,
     competition_type: p.competition_type || null,
     region:           p.region || null,
@@ -2549,6 +2609,7 @@ function buildImportedSnapshot(p) {
     units:            p.units != null ? Number(p.units) : null,
     notes:            p.notes || null,
     tracking_only:    !!p.tracking_only,
+    result:           p.result || null,
   }
 }
 
@@ -2698,7 +2759,15 @@ async function init() {
   seedDefaultTipstersOnce()
   populateTipsterSelect()
   refreshStagedBadge()
-  showPage('dashboard')
+  // Restore where the user was (and the cards they had) instead of always
+  // bouncing to the dashboard after a reload.
+  restoreExtractedBets()
+  let startPage = 'dashboard'
+  try {
+    const saved = sessionStorage.getItem(PAGE_SESSION_KEY)
+    if (saved && ['dashboard','bets','pending','live','tipsters','import','staged'].includes(saved)) startPage = saved
+  } catch {}
+  showPage(startPage)
   if (!SUPABASE_CONFIGURED) showLocalOnlyBanner()
 
   // Wire competition autocomplete: when user picks one, auto-fill region/type
@@ -2773,6 +2842,7 @@ function autoFillFromCompetition() {
 // ── PAGES ─────────────────────────────────────────────────────────
 window.showPage = function(page) {
   currentPage = page
+  try { sessionStorage.setItem(PAGE_SESSION_KEY, page) } catch {}
   document.querySelectorAll('.nav-link').forEach(el => el.classList.remove('active'))
   const navEl = document.getElementById('nav-' + page)
   if (navEl) navEl.classList.add('active')
@@ -4189,6 +4259,7 @@ window.submitBet = async function() {
   const wasExtracted = editingExtractedIndex
   if (wasExtracted !== null && wasExtracted >= 0) {
     extractedBets.splice(wasExtracted, 1)
+    persistExtractedBets()
   }
   editingExtractedIndex = null
   editingBetId = null
@@ -4265,16 +4336,20 @@ function applyPrefill(b) {
   // Decide tracking vs full mode FIRST — addParlayLeg() inspects trackingMode
   // to hide the per-leg odds input, so the mode must be set before we start
   // adding legs.
-  const looksTracking =
-    b.bet_type === TRACKING_TYPE ||
-    (b.stake == null && (b.odds == null || b.odds === 0 || b.odds === 1))
+  // Tracking is explicit only (bet_type) — a missing stake/odds no longer
+  // silently turns a bet into a Win%-only entry.
+  const looksTracking = b.bet_type === TRACKING_TYPE
   if (looksTracking) setTrackingMode('winpct')
 
   if (b.match)          document.getElementById('f-match').value       = b.match
   window.syncMatchToParts()
   if (b.competition)    document.getElementById('f-competition').value = b.competition
+  if (b.date && /^\d{4}-\d{2}-\d{2}$/.test(b.date)) document.getElementById('f-date').value = b.date
   if (!looksTracking) {
-    if (b.stake != null) {
+    if (b.units != null && Number(b.units) > 0) {
+      setUnitsDropdown(Number(b.units))
+      document.getElementById('f-stake').value = b.stake != null ? b.stake : Math.round(Number(b.units) * UNIT_COP)
+    } else if (b.stake != null) {
       document.getElementById('f-stake').value = b.stake
       setUnitsDropdown(Number(b.stake) / UNIT_COP)
     } else {
@@ -4320,6 +4395,15 @@ window.lookupCompetitionInfo = async function() {
   const match       = document.getElementById('f-match').value.trim()
   if (!competition && !match) { toast('Type a competition or match first', 'error'); return }
 
+  // Free path first: the built-in competition list.
+  const local = lookupCompetitionLocal(competition)
+  if (local) {
+    document.getElementById('f-competition').value = local.competition
+    const r = document.getElementById('lookup-result')
+    if (r) r.innerHTML = `✓ Region: ${escapeHtml(local.region)} · Type: ${escapeHtml(local.competition_type)} <span style="color:var(--gray-400)">(local list — no API call)</span>`
+    toast('Competition info filled in (local)', 'success')
+    return
+  }
   const apiKey = (localStorage.getItem('anthropicApiKey') || '').trim()
   if (!apiKey) {
     toast('Add your Anthropic API key in 📸 Import first', 'error')
@@ -5033,12 +5117,16 @@ function renderImportPage() {
   const savedKey       = localStorage.getItem('anthropicApiKey')    || ''
   const savedOpenAIKey = localStorage.getItem('openaiApiKey')       || ''
   const savedComments  = localStorage.getItem('ocrDefaultComments') || ''
+  const modelText  = getImportModel('text')
+  const modelImage = getImportModel('image')
+  const fx = loadFxRates()
   return `
   <div class="section-title">📸 Import Bets</div>
   <div style="color:var(--gray-600); font-size:12px; margin-bottom:16px; max-width:720px; line-height:1.5;">
-    Import bets from <strong>screenshots</strong> or by <strong>pasting text</strong>. Claude extracts the picks, detects parlays, and
-    (if the competition / region isn't visible) looks them up via web search. Both paths feed the same preview below —
-    review the cards, then send them to the Add Bet form to save.
+    Import bets from <strong>screenshots</strong> or by <strong>pasting text</strong>. Text in the standard
+    <code>TOTAL BETS / Batch Bet</code> format is parsed <strong>locally, instantly and for free</strong> (⚡ Local).
+    The AI (🤖) is used only for screenshots, non-standard text, or blocks the local parser can't validate — with no web
+    search, forced JSON output and no automatic retries. Competition / region are filled from the built-in list.
   </div>
 
   <div class="reader-card" style="margin-bottom:16px;">
@@ -5068,6 +5156,41 @@ function renderImportPage() {
   </div>
 
   <div class="reader-card" style="margin-bottom:16px;">
+    <h3>⚙️ Import settings</h3>
+    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:12px;">
+      <div class="form-field" style="margin:0">
+        <label class="form-label">AI model for pasted text (fallback only)</label>
+        <select class="form-input" onchange="saveImportModel('text', this.value)">
+          ${IMPORT_MODEL_OPTIONS.map(m => `<option value="${m}" ${modelText === m ? 'selected' : ''}>${m}${m === IMPORT_MODEL_DEFAULT_TEXT ? ' (default · cheapest)' : ''}</option>`).join('')}
+          ${IMPORT_MODEL_OPTIONS.includes(modelText) ? '' : `<option value="${escapeHtml(modelText)}" selected>${escapeHtml(modelText)}</option>`}
+        </select>
+      </div>
+      <div class="form-field" style="margin:0">
+        <label class="form-label">AI model for screenshots</label>
+        <select class="form-input" onchange="saveImportModel('image', this.value)">
+          ${IMPORT_MODEL_OPTIONS.map(m => `<option value="${m}" ${modelImage === m ? 'selected' : ''}>${m}${m === IMPORT_MODEL_DEFAULT_IMAGE ? ' (default · best vision)' : ''}</option>`).join('')}
+          ${IMPORT_MODEL_OPTIONS.includes(modelImage) ? '' : `<option value="${escapeHtml(modelImage)}" selected>${escapeHtml(modelImage)}</option>`}
+        </select>
+      </div>
+    </div>
+    <div class="form-field" style="margin:12px 0 0">
+      <label class="form-label">FX rates → COP (for money stakes like $100 or 10.000,00€ · leave blank to keep COP empty)</label>
+      <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        ${['USD', 'EUR', 'GBP', 'CAD'].map(c => `
+          <label style="display:flex; align-items:center; gap:5px; font-size:11.5px; font-family:var(--font-mono);">
+            1 ${c} =
+            <input type="number" step="any" min="0" class="form-input" style="width:95px; padding:5px 7px;" placeholder="COP"
+                   value="${fx[c] != null ? fx[c] : ''}" oninput="saveFxRate('${c}', this.value)" />
+          </label>`).join('')}
+      </div>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center; margin-top:12px; flex-wrap:wrap; font-size:10.5px; color:var(--gray-400); font-family:var(--font-mono);">
+      <span>1 unit = ${COP(UNIT_COP)} · identical AI inputs are served from a local cache for free</span>
+      <button class="btn btn-secondary btn-sm" onclick="clearParseCache()">🧹 Clear parse cache</button>
+    </div>
+  </div>
+
+  <div class="reader-card" style="margin-bottom:16px;">
     <h3>🖼 Upload Screenshots</h3>
     <div class="drop-zone" id="drop-zone" onclick="document.getElementById('f-screenshot').click()">
       <div class="drop-zone-icon">📥</div>
@@ -5077,8 +5200,8 @@ function renderImportPage() {
     <input type="file" id="f-screenshot" accept="image/*" multiple style="display:none" />
     <div class="thumb-grid" id="thumb-grid"></div>
     <div style="display:flex; gap:10px; margin-top:14px; flex-wrap:wrap;">
-      <button class="btn btn-primary"   onclick="extractBetsFromScreenshot()">🔍 Extract con Claude</button>
-      <button class="btn btn-primary"   onclick="extractBetsFromScreenshotOpenAI()" style="background:#10a37f; border-color:#10a37f;">🤖 Extract con ChatGPT</button>
+      <button class="btn btn-primary"   data-parse-btn="image" onclick="extractBetsFromScreenshot()">🔍 Extract con Claude</button>
+      <button class="btn btn-primary"   data-parse-btn="openai" onclick="extractBetsFromScreenshotOpenAI()" style="background:#10a37f; border-color:#10a37f;">🤖 Extract con ChatGPT</button>
       <button class="btn btn-secondary" onclick="clearScreenshots()">Clear all</button>
     </div>
   </div>
@@ -5086,8 +5209,8 @@ function renderImportPage() {
   <div class="reader-card" style="margin-bottom:16px;">
     <h3>✍️ Paste Text</h3>
     <div style="font-size:11.5px; color:var(--gray-600); margin-bottom:8px; line-height:1.5;">
-      Paste tipster recommendations, bookmaker ticket text, or any plain-text description of one or more bets.
-      Claude will detect parlays, pull out the legs, and fill in competition / region from context.
+      Paste a <strong>TOTAL BETS / Batch Bet</strong> batch (from ChatGPT or the Consolidator bot) — it's parsed locally in
+      under a second with zero API calls. Any other free-form text goes to the AI fallback (paid, no web search).
     </div>
     <div class="form-field" style="margin-bottom:10px;">
       <textarea id="f-paste-text" class="form-textarea" style="min-height:130px; font-family:var(--font-mono); font-size:12px;"
@@ -5100,10 +5223,11 @@ Combined: 7.38 · Stake: 10,000 COP"></textarea>
     </div>
     <label class="form-check" style="margin-bottom:10px;">
       <input type="checkbox" id="f-paste-tracking" />
-      <span>📊 <strong>Tracking-only</strong> — these picks have no stake (just track win % for the tipster)</span>
+      <span>📊 <strong>Tracking-only</strong> — these picks have no stake (just track win % for the tipster). Only this box makes a card tracking-only; a missing stake never does.</span>
     </label>
-    <div style="display:flex; gap:10px;">
-      <button class="btn btn-primary"   onclick="parseBetsFromText()">✍️ Parse Text</button>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+      <button class="btn btn-primary"   data-parse-btn="text" onclick="parseBetsFromText()">✍️ Parse Text</button>
+      <button class="btn btn-secondary" data-parse-btn="text-ai" onclick="parseBetsFromText({aiWholePaste:true})" title="Skip the local parser and send the whole paste to the AI (paid)">🤖 Parse with AI (paid)</button>
       <button class="btn btn-secondary" onclick="clearPasteText()">Clear</button>
     </div>
   </div>
@@ -5176,7 +5300,7 @@ function wireImportPage() {
   if (extractedBets.length > 0) {
     const comments = (document.getElementById('f-ocr-comments').value ||
                       localStorage.getItem('ocrDefaultComments') || '').trim()
-    renderExtractedBets(extractedBets, comments)
+    renderExtractedBets(extractedBets, comments, [{ kind: 'info', text: `↩ Restored ${extractedBets.length} card${extractedBets.length !== 1 ? 's' : ''} from this tab's session.` }])
   }
 }
 
@@ -5425,38 +5549,822 @@ ${summary}
 `
 }
 
-function buildExtractPrompt() {
-  const today = new Date().toISOString().slice(0, 10)
-  return `You are parsing one or more sports-betting screenshots — these are AMERICAN FOOTBALL / NFL bets.
+// ══════════════════════════════════════════════════════════════════
+// LOCAL STRUCTURED PARSER — zero API calls for the standard batch format
+// ══════════════════════════════════════════════════════════════════
+// Almost every paste (ChatGPT-from-screenshots or the Consolidator bot)
+// follows one fixed "TOTAL BETS / Batch Bet: i of N / Key: value" layout.
+// This parser handles it deterministically in <1 s. Only blocks it can't
+// validate are handed to the (paid) AI fallback.
 
-Extract every bet you can see across ALL images and return ONLY a JSON array (no markdown, no prose). Each element must have:
-- match: string — "Team1 vs Team2" (or the event name if no match is visible). For parlays, use a short label like "Parlay: <Team1>+<Team2>+...". Never null.
-- pick: string — the actual selection text. For parlays, set this to "Parlay — N legs".
-- odds: number | null — decimal odds (for a parlay, the combined/total odds). Set null when the bet is tracking-only and no odds are shown.
-- stake: number | null — stake amount if visible (number only, no currency symbol). Set null for tracking-only / call-only picks that don't include money.
-- bet_type: one of ${JSON.stringify(BET_TYPES)} — pick the closest market. If the bet is clearly tracking-only (no stake, tipster/call recommendation), use "Tracking (Win %)".
-- competition: string | null — league or cup name if visible or inferable.
-- competition_type: one of ${JSON.stringify(COMPETITION_TYPES)} if inferable, else null.
-- region: one of ${JSON.stringify(REGIONS)} or null.
-- matchday: one of ${JSON.stringify(MATCHDAYS)} if inferable, else null.
-- tipster: string | null — ONLY set this if user instructions explicitly name a tipster (e.g. "the tipster is Durden"). Otherwise null.
-- legs: array | null — for parlays only; each leg is { "pick": string, "odds": number, "match": string|null, "competition": string|null }. Each leg can be from a different match/competition.
-- notes: string | null — promo applied, cash-out info, bonus, lineup news.
-- source_image: number | null — 1-based index of the screenshot this bet came from.
+const STRUCTURED_BLOCK_RE = /^\s*(?:\d+[.)]\s*)?Batch Bet:\s*\d+\s+of\s+\d+/mi
+const TOTAL_BETS_RE       = /^\s*(?:\d+[.)]\s*)?TOTAL BETS:\s*(\d+)/mi
+function looksStructured(text) {
+  return STRUCTURED_BLOCK_RE.test(text || '') || TOTAL_BETS_RE.test(text || '')
+}
 
-Important:
-- You HAVE access to a web_search tool. USE IT to validate every bet. For each distinct team pair (and each leg of a parlay), run a web search like "<Team1> <Team2> ${today}" or "<Team1> next match competition" to confirm which competition they are playing. Use search results to fill or correct competition (official name), competition_type, region, and matchday.
-- If competition or region is NOT explicitly shown in the image, fill them from web search (preferred) or your own knowledge. Don't leave them null if a reasonable value exists.
-- READ THE USER INSTRUCTIONS BELOW CAREFULLY. They may specify metadata that isn't in the images — especially the tipster ("this is from tipster Durden"), the sportsbook, the currency, or which parts to focus on. Apply such overrides to EVERY bet.
-- For PARLAYS specifically: each leg can be from a different match and different competition. Set the parlay's top-level "match" to a short descriptor and put real per-leg match and competition inside each legs[] entry. Run a separate web search per leg. ALWAYS extract the legs[] array for parlays — even when the parlay has no stake and is just for tracking (a tipster's call on a combined pick). Each leg's "odds" is optional when the whole thing is tracking-only.
-- DETECT PARLAYS whether they're money bets OR tracking-only. Signals a parlay: multiple picks in a single ticket/card, keywords like "parlay", "combo", "acca", "accumulator", "multibet", "múltiple", "combinada", or a numbered / bulleted list of 2+ independent picks.
-- If the same bet appears across multiple screenshots, return it ONCE.
-- If multiple independent bets appear, return each as a separate element.
-- Current date: ${today}.
-- After any web searches, your FINAL message MUST be ONLY the JSON array — no prose, no markdown, just the JSON.`
+// lowercase · strip accents · collapse punctuation. Used for keys + dedupe.
+function normKey(s) {
+  return String(s == null ? '' : s)
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\s+(vs?\.?|v\.?|-|–|—|@|x)\s+/g, ' v ')   // " vs " / " v " / " - " / " x " → " v "
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+}
+function normMatchName(s) {
+  if (!s) return ''
+  return String(s).trim()
+    .replace(/\s+/g, ' ')
+    .replace(/\s+(?:vs?\.?|v\.?)\s+/i, ' vs ')
+}
+
+// "10.000,00" → 10000 · "1,000.50" → 1000.5 · "0.25" → 0.25 · "1,25" → 1.25 · "50000" → 50000
+function parseLocaleNumber(raw) {
+  if (raw == null) return null
+  let s = String(raw).trim().replace(/[\s ']/g, '')
+  if (!s) return null
+  const hasDot = s.includes('.'), hasComma = s.includes(',')
+  if (hasDot && hasComma) {
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) s = s.replace(/\./g, '').replace(',', '.')   // European
+    else                                          s = s.replace(/,/g, '')                       // US
+  } else if (hasComma) {
+    const parts = s.split(',')
+    if (parts.length > 2 || (parts.length === 2 && parts[1].length === 3)) s = parts.join('')   // thousands
+    else s = s.replace(',', '.')                                                               // decimal
+  } else if (hasDot) {
+    const parts = s.split('.')
+    if (parts.length > 2 || (parts.length === 2 && parts[1].length === 3 && parts[0].length <= 3 && Number(parts[0]) >= 1)) s = parts.join('')  // "10.000" → 10000
+  }
+  const n = Number(s)
+  return Number.isFinite(n) ? n : null
+}
+
+// Odds in any notation → decimal. "+700" → 8.00 · "-120" → 1.83 · "1/1" → 2.00 ·
+// "2.6/1" → 3.60 · "8/13" → 1.615 · "1,85" → 1.85 · "@2.10" → 2.10
+function parseOddsToken(raw) {
+  if (raw == null) return null
+  let s = String(raw).trim().replace(/^@\s*/, '').replace(/^\((.*)\)$/, '$1').trim()
+  if (!s) return null
+  let m = s.match(/^([+-])\s*(\d{3,5})$/)                                 // American
+  if (m) { const x = Number(m[2]); if (x < 100) return null; return round2(m[1] === '+' ? 1 + x / 100 : 1 + 100 / x) }
+  m = s.match(/^(\d+(?:[.,]\d+)?)\s*\/\s*(\d+(?:[.,]\d+)?)$/)             // Fractional
+  if (m) {
+    const a = Number(m[1].replace(',', '.')), b = Number(m[2].replace(',', '.'))
+    return b > 0 ? round2(1 + a / b) : null
+  }
+  m = s.match(/^(\d+(?:[.,]\d+)?)$/)                                       // Decimal
+  if (m) { const v = Number(m[1].replace(',', '.')); return v >= 1 ? v : null }
+  return null
+}
+function round2(n) { return Math.round(n * 100) / 100 }
+
+// Words that, when they precede a trailing number, mean the number is a LINE
+// (Over 2.5) not the odds. Prevents "Over 2.5" → odds 2.50.
+const LINE_WORDS_RE = /^(over|under|o|u|ov|un|más|mas|menos|de|handicap|hándicap|spread|alt|tt|line|línea|linea|total|totals|race\s+to|to|margin|\+|-|–)$/i
+// Nouns after which a ONE-decimal number ("corners 9.5") is still a line, but a
+// two-decimal number ("Receptions 1.85") is odds.
+const LINE_NOUNS_RE = /^(points?|pts|puntos|yds?|yards?|yardas|receptions?|recs?|recepciones|completions?|attempts?|carries|rushes|sacks?|interceptions?|ints?|tds?|touchdowns?|fgs?|kicks?|tackles?|assists?|targets?|passes|pases|longest|margin|total)$/i
+
+// Pull an optional trailing odds token off a leg line.
+// Returns { pick, odds }. Accepts "@ 1.57", "(1.57)", "1.57", "8/13", "+150".
+function splitLegOdds(line) {
+  let s = String(line || '').trim()
+  let odds = null
+  // "(Odds: 1.33)" / "(Cuota: 1,33)" / "[odds 1.33]" anywhere in the line
+  let m = s.match(/[\(\[]\s*(?:odds?|cuotas?|@)\s*:?\s*([+-]?\d+(?:[.,]\d+)?(?:\s*\/\s*\d+(?:[.,]\d+)?)?)\s*[\)\]]/i)
+  if (m) { const o = parseOddsToken(m[1]); if (o) return { pick: s.replace(m[0], '').replace(/\s{2,}/g, ' ').trim().replace(/[,;:\-–]\s*$/, '').trim(), odds: o } }
+  m = s.match(/^(.*?)\s*(?:@|\bat\b|—|–|-)\s*([+-]?\d+(?:[.,]\d+)?(?:\s*\/\s*\d+(?:[.,]\d+)?)?)\s*$/i)
+  if (m && /@/.test(s)) { const o = parseOddsToken(m[2]); if (o) return { pick: m[1].trim(), odds: o } }
+  m = s.match(/^(.*?)\s*\(\s*([+-]?\d+(?:[.,]\d+)?(?:\s*\/\s*\d+(?:[.,]\d+)?)?)\s*\)\s*$/)
+  if (m) { const o = parseOddsToken(m[2]); if (o) return { pick: m[1].trim(), odds: o } }
+  // Bare trailing token: "<pick> 1.57" / "<pick> 8/13" / "<pick> +150"
+  m = s.match(/^(.*\S)\s+([+-]?\d+(?:[.,]\d+)?(?:\s*\/\s*\d+(?:[.,]\d+)?)?)\s*$/)
+  if (m) {
+    const tok = m[2], before = m[1]
+    const prevWord = (before.match(/(\S+)\s*$/) || [])[1] || ''
+    const isAmerican = /^[+-]\d{3,5}$/.test(tok)
+    const isFrac = /\//.test(tok)
+    const isDec = /^\d+[.,]\d+$/.test(tok)
+    const nounLine = LINE_NOUNS_RE.test(prevWord) && /^\d+[.,]\d$/.test(tok)   // "corners 9.5" → line, not odds
+    if (isAmerican || isFrac || (isDec && !LINE_WORDS_RE.test(prevWord) && !nounLine && !/^[+-]/.test(tok))) {
+      const o = parseOddsToken(tok)
+      if (o && o >= 1.01 && o <= 100) return { pick: before.trim(), odds: o }
+    }
+  }
+  return { pick: s, odds }
+}
+
+// ── Stake → units / amount / currency / COP ────────────────────────
+const CURRENCY_TOKENS = {
+  '$': 'USD', 'US$': 'USD', 'USD': 'USD', 'U$S': 'USD',
+  '£': 'GBP', 'GBP': 'GBP',
+  '€': 'EUR', 'EUR': 'EUR',
+  'COP': 'COP', 'COL$': 'COP',
+  'CAD': 'CAD', 'C$': 'CAD', 'CA$': 'CAD',
+  'MXN': 'MXN', 'MX$': 'MXN', 'ARS': 'ARS', 'PEN': 'PEN', 'S/': 'PEN', 'CLP': 'CLP', 'BRL': 'BRL', 'R$': 'BRL',
+}
+// Returns { raw, units, stake_amount, stake_currency, stake_cop }.
+// "1.25U" → units 1.25, stake_cop = units × UNIT_COP (never the bare number).
+// "10.000,00€" → 10000 EUR; stake_cop only if an FX rate for EUR is configured.
+// "50000 COP" / bare "50000" → 50000 COP.
+function parseStakeString(raw) {
+  const out = { raw: raw ? String(raw).trim() : null, units: null, stake_amount: null, stake_currency: null, stake_cop: null }
+  if (!out.raw) return out
+  const s = out.raw.replace(/\s+/g, ' ')
+  let m = s.match(/^(\d+(?:[.,]\d+)?)\s*(?:u|un|und|unit|units|unidad|unidades)\b\.?$/i)
+  if (m) {
+    out.units = parseLocaleNumber(m[1])
+    if (out.units != null) out.stake_cop = Math.round(out.units * UNIT_COP)
+    return out
+  }
+  const numM = s.match(/\d[\d.,\s]*\d|\d/)
+  if (!numM) return out
+  const amount = parseLocaleNumber(numM[0])
+  if (amount == null) return out
+  const cur = s.replace(numM[0], '').replace(/[\s.]/g, '').toUpperCase()
+  const code = CURRENCY_TOKENS[cur] || (/^[A-Z]{3}$/.test(cur) ? cur : (cur === '' ? 'COP' : null))
+  if (!code) return out
+  out.stake_amount = amount
+  out.stake_currency = code
+  if (code === 'COP') out.stake_cop = Math.round(amount)
+  else {
+    const fx = loadFxRates()
+    if (Number(fx[code]) > 0) out.stake_cop = Math.round(amount * Number(fx[code]))
+  }
+  return out
+}
+
+// ── Date → YYYY-MM-DD (local, never UTC-shifted) ──────────────────
+const MONTHS_3 = { jan:1, ene:1, feb:2, mar:3, apr:4, abr:4, may:5, jun:6, jul:7, aug:8, ago:8, sep:9, set:9, oct:10, nov:11, dec:12, dic:12 }
+function parseDateToISO(raw) {
+  if (!raw) return null
+  const s = String(raw).trim()
+  let m = s.match(/^(\d{1,2})[-\/ .]([A-Za-z]{3,})[a-z]*[-\/ .](\d{4})$/)          // 09-Oct-2026
+  if (m) { const mo = MONTHS_3[m[2].slice(0, 3).toLowerCase()]; if (mo) return isoDate(m[3], mo, m[1]) }
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/)                                        // 2026-10-09
+  if (m) return isoDate(m[1], m[2], m[3])
+  m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})$/)                             // 09/10/2026 (DD/MM)
+  if (m) return isoDate(m[3], m[2], m[1])
+  m = s.match(/^([A-Za-z]{3,})[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})$/)                   // Oct 9, 2026
+  if (m) { const mo = MONTHS_3[m[1].slice(0, 3).toLowerCase()]; if (mo) return isoDate(m[3], mo, m[2]) }
+  return null
+}
+function isoDate(y, mo, d) {
+  const Y = Number(y), M = Number(mo), D = Number(d)
+  if (!(Y > 2000 && M >= 1 && M <= 12 && D >= 1 && D <= 31)) return null
+  return `${Y}-${String(M).padStart(2, '0')}-${String(D).padStart(2, '0')}`
+}
+
+// ── Resultado → 'won' | 'lost' | 'void' | null ───────────────────
+function parseResultToken(raw) {
+  if (!raw) return null
+  const s = String(raw).trim().toLowerCase()
+  if (/^(ganada|ganado|won|win|w|✅|acertada|green)\b/.test(s)) return 'won'
+  if (/^(perdida|perdido|lost|loss|lose|l|❌|fallida|red)\b/.test(s)) return 'lost'
+  if (/^(nula|anulada|void|push|cancelada|cancelled|canceled|reembolso|refund)\b/.test(s)) return 'void'
+  return null
+}
+
+// ── Market text → BET_TYPES value (American football) ────────────
+// Order matters: first match wins. Most specific markets first.
+const MARKET_KEYWORDS = [
+  // Parlays / futures / awards
+  [/\b(sgp|same[\s-]*game\s+parlay)\b/i,                                                           'Same Game Parlay'],
+  [/\b(season\s+)?win\s+total(s)?\b|\bregular[\s-]*season\s+wins\b/i,                              'Season Win Total'],
+  [/\b(mvp|opoy|dpoy|oroy|droy|roy|rookie\s+of\s+the\s+year|player\s+of\s+the\s+year|coach\s+of\s+the\s+year|comeback\s+player)\b/i, 'Awards (MVP/OPOY/DPOY/ROY)'],
+  [/\b(to\s+win\s+(the\s+)?(super\s*bowl|afc|nfc|division|conference)|super\s*bowl\s+(winner|champion)|division\s+winner|conference\s+(winner|champion)|to\s+make\s+(the\s+)?playoffs|futures?)\b/i, 'Futures (Division/Conference/Super Bowl)'],
+  [/\b(draft)\b/i,                                                                                 'Draft Specials'],
+  // Touchdown scorers
+  [/\b(first\s+(td|touchdown)(\s+scorer)?|1st\s+(td|touchdown)(\s+scorer)?|primer\s+(td|touchdown|anotador))\b/i, 'First Touchdown Scorer'],
+  [/\b(last\s+(td|touchdown)(\s+scorer)?|[uú]ltimo\s+(td|touchdown|anotador))\b/i,                 'Last Touchdown Scorer'],
+  [/\b(2\+\s*(td|tds|touchdowns?)|two\s+or\s+more\s+(td|touchdowns?)|dos\s+o\s+m[aá]s\s+touchdowns?)\b|\b2\+\s*td/i, '2+ Touchdowns'],
+  [/\b(d\/?st\s+td|defensive\s+(td|touchdown|score)|special\s+teams\s+(td|touchdown)|defense\s*\/\s*special\s+teams)\b/i, 'Defense / Special Teams TD'],
+  [/\b(anytime\s+(td|touchdown)(\s+scorer)?|atd|ats\b(?=.*touchdown)|to\s+score\s+a\s+(td|touchdown)|anota\s+(td|touchdown)|touchdown\s+(en\s+)?cualquier\s+momento|td\s+scorer|anytime\s+scorer)\b/i, 'Anytime Touchdown Scorer'],
+  // QB props
+  [/\b(pass(ing)?\s+(tds?|touchdowns?)|td\s+passes|touchdown\s+passes)\b/i,                        'QB Passing TDs'],
+  [/\b(pass(ing)?\s+(yds?|yards)|yardas\s+(de\s+)?pase|pass\s+yd)\b/i,                             'QB Passing Yards'],
+  [/\b(completions?|pass(ing)?\s+attempts?|comp\b|cmp\b|attempts?)\b/i,                           'QB Completions / Attempts'],
+  [/\b((ints?|interceptions?)\s+thrown|thrown\s+(ints?|interceptions?)|to\s+throw\s+(an?\s+)?(int|interception))\b/i, 'QB Interceptions Thrown'],
+  [/\b(qb\s+rush(ing)?\s+(yds?|yards)|quarterback\s+rush(ing)?\s+(yds?|yards))\b/i,               'QB Rushing Yards'],
+  // Rushing / receiving props
+  [/\b(rush(ing)?\s*\+\s*rec(eiving)?(\s+(yds?|yards))?|rec(eiving)?\s*\+\s*rush(ing)?(\s+(yds?|yards))?|scrimmage\s+(yds?|yards)|total\s+(yds?|yards)\s+from\s+scrimmage)\b/i, 'Rush + Rec Yards'],
+  [/\b(longest\s+(reception|rush|catch|run|completion))\b/i,                                       'Longest Reception / Rush'],
+  [/\b(rush(ing)?\s+(att|attempts?|carries)|carries)\b/i,                                          'Rushing Attempts'],
+  [/\b(rush(ing)?\s+(yds?|yards)|yardas\s+(por\s+)?(tierra|acarreo)|rush\s+yd)\b/i,                'Rushing Yards'],
+  [/\b(rec(eiving)?\s+(yds?|yards)|yardas\s+(por\s+)?recepci[oó]n|rec\s+yd)\b/i,                  'Receiving Yards'],
+  [/\b(receptions?|recs?|catches|recepciones)\b/i,                                                 'Receptions'],
+  // Kicking / defense props
+  [/\b(kick(ing|er)?\s+(points|pts)|puntos\s+(de\s+)?pateador)\b/i,                                'Kicking Points'],
+  [/\b(field\s+goals?(\s+made)?|fgs?\s+made|fgm|fg\b|goles?\s+de\s+campo)\b/i,                     'Field Goals Made'],
+  [/\b(sacks?|capturas?)\b/i,                                                                      'Sacks'],
+  [/\b(tackles?(\s*\+\s*assists?|\s+and\s+assists?)?|tacleadas|solo\s+tackles)\b/i,                'Tackles + Assists'],
+  [/\b(interceptions?|ints?)\b/i,                                                                  'Interceptions (defense)'],
+  // Game props
+  [/\b(first\s+(team\s+)?to\s+score|primero\s+en\s+anotar|first\s+score)\b/i,                      'First Team To Score'],
+  [/\b(last\s+(team\s+)?to\s+score|[uú]ltimo\s+en\s+anotar|last\s+score)\b/i,                      'Last Team To Score'],
+  [/\b(race\s+to\s+\d+|carrera\s+a\s+\d+|first\s+to\s+\d+\s+points)\b/i,                           'Race To 10/20 Points'],
+  [/\b(winning\s+margin|margen\s+de\s+victoria|margin\s+of\s+victory)\b/i,                         'Winning Margin'],
+  [/\bboth\s+teams?\s+(to\s+)?score\s+20\+?|ambos\s+(equipos\s+)?anotan\s+20\+?/i,                 'Both Teams To Score 20+'],
+  [/\b(highest\s+scoring\s+half|mitad\s+con\s+m[aá]s\s+puntos)\b/i,                                'Highest Scoring Half'],
+  [/\b(overtime|ot\b|tiempo\s+extra|pr[oó]rroga)\b/i,                                              'Overtime (Yes/No)'],
+  // Halves / quarters
+  [/\b(1h|1st\s+half|first\s+half|primera\s+mitad|primer\s+tiempo|half[\s-]*time)\b.*\b(ml|moneyline|money\s*line|to\s+win|winner|gana)\b/i, '1st Half — Moneyline'],
+  [/\b(1h|1st\s+half|first\s+half|primera\s+mitad|primer\s+tiempo|half[\s-]*time)\b.*(\b(spread|handicap|h[aá]ndicap|ats)\b|[+-]\d+(\.\d+)?)/i, '1st Half — Spread'],
+  [/\b(1h|1st\s+half|first\s+half|primera\s+mitad|primer\s+tiempo|half[\s-]*time)\b/i,              '1st Half — Total'],
+  [/\b(2h|2nd\s+half|second\s+half|segunda\s+mitad|segundo\s+tiempo)\b.*\b(ml|moneyline|money\s*line|to\s+win|winner|gana)\b/i, '2nd Half — Moneyline'],
+  [/\b(2h|2nd\s+half|second\s+half|segunda\s+mitad|segundo\s+tiempo)\b.*(\b(spread|handicap|h[aá]ndicap|ats)\b|[+-]\d+(\.\d+)?)/i, '2nd Half — Spread'],
+  [/\b(2h|2nd\s+half|second\s+half|segunda\s+mitad|segundo\s+tiempo)\b/i,                          '2nd Half — Total'],
+  [/\b(1q|q1|1st\s+quarter|first\s+quarter|primer\s+cuarto)\b/i,                                   '1st Quarter — Moneyline/Spread/Total'],
+  [/\b([234]q|q[234]|[234](nd|rd|th)\s+quarter|(second|third|fourth)\s+quarter|(segundo|tercer|cuarto)\s+cuarto|quarter)\b/i, 'Quarter Betting (any quarter)'],
+  // Spreads / totals / team totals
+  [/\b(alt(ernate|ernative)?\s+spread|spread\s+alternativ[oa])\b/i,                                'Alternate Spread'],
+  [/\b(alt(ernate|ernative)?\s+total|total\s+alternativ[oa])\b/i,                                  'Alternate Total'],
+  [/\b(team\s+total(\s+points)?|tt\b|puntos\s+(del\s+)?equipo|total\s+(de\s+)?puntos\s+(de\s+)?(los|el|las|la)\b)/i, 'Team Total Points'],
+  [/\b(spread|ats|handicap|h[aá]ndicap|pts\s+spread|point\s+spread|cover)\b|(^|\s)[+-]\d+(\.\d+)?(\s|$)/i, 'Point Spread'],
+  [/\b(over|under|o\s*\d|u\s*\d|m[aá]s\s+de|menos\s+de|total\s+points?|total|puntos\s+totales|ov|un)\b|\b[ou]\d+(\.\d+)?\b/i, 'Total Points (Over/Under)'],
+  // Generic props
+  [/\b(player\s+prop|prop\s+bet|jugador)\b/i,                                                      'Player Props'],
+  [/\b(game\s+prop)\b/i,                                                                           'Game Props'],
+  // Moneyline last — bare team names fall here
+  [/\b(ml|moneyline|money\s*line|to\s+win|win|winner|gana|ganador|victoria|straight\s+up|outright)\b/i, 'Moneyline'],
+]
+function mapMarketToBetType(text) {
+  const s = String(text || '')
+  if (!s.trim()) return 'Other'
+  for (const [re, type] of MARKET_KEYWORDS) if (re.test(s)) return type
+  return 'Other'
+}
+
+// ── Competition → canonical name + region + type (local, no web) ──
+// Keys are normalized (lowercase, no accents/punctuation). Values must
+// be the exact COMPETITIONS[0] names from src/lib/supabase.js.
+const COMPETITION_ALIASES = {
+  'nfl': 'NFL Regular Season', 'nfl regular season': 'NFL Regular Season', 'nfl season': 'NFL Regular Season',
+  'regular season': 'NFL Regular Season', 'temporada regular': 'NFL Regular Season', 'national football league': 'NFL Regular Season',
+  'nfl week': 'NFL Regular Season', 'week': 'NFL Regular Season', 'semana': 'NFL Regular Season',
+  'tnf': 'NFL Regular Season', 'thursday night football': 'NFL Regular Season', 'thursday night': 'NFL Regular Season',
+  'snf': 'NFL Regular Season', 'sunday night football': 'NFL Regular Season', 'sunday night': 'NFL Regular Season',
+  'mnf': 'NFL Regular Season', 'monday night football': 'NFL Regular Season', 'monday night': 'NFL Regular Season',
+  'afc': 'NFL Regular Season (AFC)', 'nfl afc': 'NFL Regular Season (AFC)', 'afc east': 'NFL Regular Season (AFC)', 'afc west': 'NFL Regular Season (AFC)', 'afc north': 'NFL Regular Season (AFC)', 'afc south': 'NFL Regular Season (AFC)',
+  'nfc': 'NFL Regular Season (NFC)', 'nfl nfc': 'NFL Regular Season (NFC)', 'nfc east': 'NFL Regular Season (NFC)', 'nfc west': 'NFL Regular Season (NFC)', 'nfc north': 'NFL Regular Season (NFC)', 'nfc south': 'NFL Regular Season (NFC)',
+  'preseason': 'NFL Preseason', 'nfl preseason': 'NFL Preseason', 'pretemporada': 'NFL Preseason',
+  'hall of fame game': 'NFL Hall of Fame Game', 'hof game': 'NFL Hall of Fame Game',
+  'kickoff game': 'NFL Kickoff Game', 'nfl kickoff': 'NFL Kickoff Game', 'season opener': 'NFL Kickoff Game',
+  'thanksgiving': 'NFL Thanksgiving', 'nfl thanksgiving': 'NFL Thanksgiving', 'thanksgiving day': 'NFL Thanksgiving',
+  'christmas': 'NFL Christmas Games', 'nfl christmas': 'NFL Christmas Games', 'christmas day': 'NFL Christmas Games', 'navidad': 'NFL Christmas Games',
+  'playoffs': 'NFL Wild Card Round', 'nfl playoffs': 'NFL Wild Card Round', 'postseason': 'NFL Wild Card Round',
+  'wild card': 'NFL Wild Card Round', 'wildcard': 'NFL Wild Card Round', 'wild card round': 'NFL Wild Card Round', 'wild card weekend': 'NFL Wild Card Round', 'comodin': 'NFL Wild Card Round',
+  'divisional': 'NFL Divisional Round', 'divisional round': 'NFL Divisional Round', 'ronda divisional': 'NFL Divisional Round',
+  'conference championship': 'AFC Championship Game', 'championship game': 'AFC Championship Game', 'conference championships': 'AFC Championship Game',
+  'afc championship': 'AFC Championship Game', 'afc championship game': 'AFC Championship Game', 'afc title game': 'AFC Championship Game', 'final afc': 'AFC Championship Game',
+  'nfc championship': 'NFC Championship Game', 'nfc championship game': 'NFC Championship Game', 'nfc title game': 'NFC Championship Game', 'final nfc': 'NFC Championship Game',
+  'super bowl': 'Super Bowl', 'superbowl': 'Super Bowl', 'sb': 'Super Bowl', 'super bowl lx': 'Super Bowl', 'super bowl lxi': 'Super Bowl', 'supertazon': 'Super Bowl',
+  'pro bowl': 'Pro Bowl Games', 'pro bowl games': 'Pro Bowl Games',
+  'international series': 'NFL London Games', 'international': 'NFL London Games', 'nfl international': 'NFL London Games',
+  'london': 'NFL London Games', 'london games': 'NFL London Games', 'nfl london': 'NFL London Games', 'london game': 'NFL London Games', 'tottenham': 'NFL London Games', 'wembley': 'NFL London Games', 'londres': 'NFL London Games',
+  'germany': 'NFL Germany Games', 'germany games': 'NFL Germany Games', 'nfl germany': 'NFL Germany Games', 'munich': 'NFL Germany Games', 'frankfurt': 'NFL Germany Games', 'berlin': 'NFL Germany Games', 'alemania': 'NFL Germany Games',
+  'brazil': 'NFL Brazil Game', 'brazil game': 'NFL Brazil Game', 'nfl brazil': 'NFL Brazil Game', 'sao paulo': 'NFL Brazil Game', 'brasil': 'NFL Brazil Game',
+  'mexico': 'NFL Mexico Game', 'mexico game': 'NFL Mexico Game', 'nfl mexico': 'NFL Mexico Game', 'mexico city': 'NFL Mexico Game', 'estadio azteca': 'NFL Mexico Game',
+  'ncaa': 'NCAA Football (FBS)', 'ncaaf': 'NCAA Football (FBS)', 'ncaa football': 'NCAA Football (FBS)', 'cfb': 'NCAA Football (FBS)', 'college football': 'NCAA Football (FBS)', 'college': 'NCAA Football (FBS)', 'fbs': 'NCAA Football (FBS)', 'futbol americano universitario': 'NCAA Football (FBS)',
+  'sec': 'SEC', 'sec football': 'SEC', 'southeastern conference': 'SEC',
+  'big ten': 'Big Ten', 'big 10': 'Big Ten', 'b1g': 'Big Ten',
+  'big 12': 'Big 12', 'big twelve': 'Big 12', 'big xii': 'Big 12',
+  'acc': 'ACC', 'atlantic coast conference': 'ACC',
+  'pac 12': 'Pac-12', 'pac12': 'Pac-12',
+  'cfp': 'College Football Playoff', 'college football playoff': 'College Football Playoff', 'playoff cfp': 'College Football Playoff', 'national championship': 'College Football Playoff',
+  'bowl': 'NCAA Bowl Games', 'bowl game': 'NCAA Bowl Games', 'bowl games': 'NCAA Bowl Games', 'bowl season': 'NCAA Bowl Games', 'ncaa bowl': 'NCAA Bowl Games',
+  'ufl': 'UFL', 'united football league': 'UFL', 'xfl': 'UFL', 'usfl': 'UFL',
+  'cfl': 'CFL', 'canadian football league': 'CFL', 'grey cup': 'CFL',
+  'arena football': 'Arena Football', 'arena': 'Arena Football', 'afl': 'Arena Football', 'indoor football': 'Arena Football',
+}
+function lookupCompetitionLocal(name) {
+  if (!name) return null
+  const key = normKey(name)
+  if (!key) return null
+  const canon = COMPETITION_ALIASES[key]
+  let hit = COMPETITIONS.find(c => normKey(c[0]) === key)
+  if (!hit && canon) hit = COMPETITIONS.find(c => c[0] === canon)
+  if (!hit) hit = COMPETITIONS.find(c => { const k = normKey(c[0]); return k.length >= 5 && (k.includes(key) || key.includes(k)) })
+  if (!hit && !canon) {
+    // alias substring (e.g. "NFL Week 6 2026")
+    const aliasKey = Object.keys(COMPETITION_ALIASES).find(a => a.length >= 4 && key.includes(a))
+    if (aliasKey) hit = COMPETITIONS.find(c => c[0] === COMPETITION_ALIASES[aliasKey])
+  }
+  return hit ? { competition: hit[0], region: hit[1], competition_type: hit[2] } : null
+}
+// "Week 6" / "NFL Week 6" / "Semana 6" / "W6" / "SNF" / "Wild Card" → a MATCHDAYS value, else null.
+const MATCHDAY_PATTERNS = [
+  [/\b(?:week|wk|w|semana|jornada)\s*0?(1[0-8]|[1-9])\b/i,            m => `Week ${Number(m[1])}`],
+  [/\b(tnf|thursday\s+night(\s+football)?)\b/i,                        () => 'Thursday Night Football'],
+  [/\b(snf|sunday\s+night(\s+football)?)\b/i,                          () => 'Sunday Night Football'],
+  [/\b(mnf|monday\s+night(\s+football)?)\b/i,                          () => 'Monday Night Football'],
+  [/\b(international\s+series|london|germany|munich|frankfurt|berlin|brazil|sao\s+paulo|mexico|madrid|dublin|melbourne)\b/i, () => 'International Series'],
+  [/\b(wild\s*card|comod[ií]n)\b/i,                                     () => 'Wild Card'],
+  [/\b(divisional)\b/i,                                                 () => 'Divisional Round'],
+  [/\b(conference\s+championship|afc\s+championship|nfc\s+championship|championship\s+game|title\s+game)\b/i, () => 'Conference Championship'],
+  [/\b(super\s*bowl|supertaz[oó]n)\b/i,                                 () => 'Super Bowl'],
+  [/\b(pro\s+bowl)\b/i,                                                 () => 'Pro Bowl Games'],
+  [/\b(hall\s+of\s+fame\s+game|hof\s+game)\b/i,                       () => 'Hall of Fame Game'],
+  [/\b(preseason|pretemporada)\s*(?:week|wk|w)?\s*([1-3])\b/i,          m => `Preseason W${m[2]}`],
+  [/\b(cfp\s+(first\s+round|round\s+1|1st\s+round))\b/i,              () => 'CFP First Round'],
+  [/\b(cfp\s+quarterfinals?|quarterfinals?)\b/i,                        () => 'CFP Quarterfinal'],
+  [/\b(cfp\s+semifinals?|semifinals?)\b/i,                              () => 'CFP Semifinal'],
+  [/\b(national\s+championship)\b/i,                                    () => 'National Championship'],
+  [/\b(conference\s+title\s+game|sec\s+championship|big\s+ten\s+championship|big\s+12\s+championship|acc\s+championship)\b/i, () => 'Conference Title Game'],
+  [/\b(rivalry\s+week)\b/i,                                             () => 'Rivalry Week'],
+  [/\b(bowl)\b/i,                                                       () => 'Bowl Game'],
+  [/\b(regular\s+season|temporada\s+regular)\b/i,                      () => 'Regular Season'],
+]
+function matchdayFromText(text) {
+  const t = String(text || '')
+  if (!t.trim()) return null
+  for (const [re, fn] of MATCHDAY_PATTERNS) {
+    const m = t.match(re)
+    if (m) { const v = fn(m); if (MATCHDAYS.includes(v)) return v }
+  }
+  return null
+}
+
+// Fill competition / region / type for a bet and its legs from the local
+// COMPETITIONS list. Leaves unknown names as typed. Never touches the network.
+function fillCompetitionLocal(bet) {
+  if (!bet) return bet
+  const legs = Array.isArray(bet.legs) ? bet.legs : []
+  // Week / round from the raw league text BEFORE it is canonicalized
+  if (!bet.matchday) {
+    const rawTexts = [bet.competition, bet.matchday_hint, ...legs.map(l => l.competition || l.tournament)].filter(Boolean)
+    for (const rt of rawTexts) { const md = matchdayFromText(rt); if (md) { bet.matchday = md; break } }
+  }
+  delete bet.matchday_hint
+  legs.forEach(l => {
+    const info = lookupCompetitionLocal(l.competition || l.tournament)
+    if (info) { l.competition = info.competition; l.region = l.region || info.region; l.competition_type = l.competition_type || info.competition_type }
+  })
+  if (!bet.competition && legs.length) {
+    const comps = [...new Set(legs.map(l => l.competition).filter(Boolean))]
+    if (comps.length === 1) bet.competition = comps[0]
+  }
+  const info = lookupCompetitionLocal(bet.competition)
+  if (info) {
+    bet.competition = info.competition
+    if (!bet.region)           bet.region = info.region
+    if (!bet.competition_type) bet.competition_type = info.competition_type
+  } else if (!bet.region && legs.length) {
+    const regs = [...new Set(legs.map(l => l.region).filter(Boolean))]
+    if (regs.length === 1) bet.region = regs[0]
+  }
+  return bet
+}
+
+// ── Block → bet ────────────────────────────────────────────────────
+function normalizeKvKey(k) {
+  return String(k || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+const KV_KEY_RE  = /^\s*([A-Za-zÀ-ſ][A-Za-z0-9À-ſ _\/()-]{0,40}?)\s*:\s*(.*)$/
+const LEG_LINE_RE = /^\s*(?:[-•*▪●]|\d{1,2}[.)])\s+(.*)$/
+const LEG_META_KEYS = { 'partido leg': 'match', 'match leg': 'match', 'leg partido': 'match', 'leg match': 'match', 'liga leg': 'competition', 'league leg': 'competition', 'leg liga': 'competition', 'competicion leg': 'competition', 'competition leg': 'competition' }
+
+function parseLegLine(text) {
+  const { pick, odds } = splitLegOdds(text)
+  return { pick: pick, odds: odds, match: null, competition: null }
+}
+
+function parseStructuredBlock(block, opts = {}) {
+  const errors = []
+  const kv = {}
+  const legs = []
+  let inApuesta = false
+  let cur = null
+  // Tolerate markdown bold / backticks / leading emojis around keys, and
+  // several "Key: value" pairs on one line separated by " | " or " · ".
+  const rawLines = []
+  for (const rl of String(block).split(/\r?\n/)) {
+    let l = rl.replace(/\*\*|__|`/g, '').replace(/\s+$/, '')
+    if (!l.trim()) continue
+    const legStart = LEG_LINE_RE.test(l)
+    if (!legStart) l = l.replace(/^[^\p{L}\p{N}]+/u, m => /^\s+$/.test(m) ? m : '')   // drop leading emoji/punct, keep indentation
+    const pairs = l.split(/\s+[|·]\s+/)
+    if (!legStart && pairs.length > 1 && pairs.filter(p => KV_KEY_RE.test(p)).length >= 2) rawLines.push(...pairs)
+    else rawLines.push(l)
+  }
+  for (const rawLine of rawLines) {
+    const line = rawLine.replace(/\s+$/, '')
+    if (!line.trim()) continue
+    if (inApuesta) {
+      const legM = line.match(LEG_LINE_RE)
+      if (legM) { cur = parseLegLine(legM[1]); legs.push(cur); continue }
+      const km = line.match(KV_KEY_RE)
+      if (km) {
+        const key = normalizeKvKey(km[1])
+        if (LEG_META_KEYS[key]) {
+          if (cur) { const f = LEG_META_KEYS[key]; cur[f] = f === 'match' ? normMatchName(km[2]) : km[2].trim() }
+          continue
+        }
+        inApuesta = false   // any other Key: closes the Apuesta section — fall through
+      } else {
+        if (cur) cur.pick = (cur.pick + ' ' + line.trim()).trim()   // wrapped leg text
+        continue
+      }
+    }
+    const km = line.match(KV_KEY_RE)
+    if (!km) continue
+    const key = normalizeKvKey(km[1])
+    const val = km[2].trim()
+    if (key === 'apuesta' || key === 'apuestas' || key === 'bet' || key === 'bets' || key === 'pick' || key === 'picks' || key === 'seleccion' || key === 'selecciones') {
+      inApuesta = true
+      if (val) { cur = parseLegLine(val.replace(/^[-•*]\s*/, '')); legs.push(cur) }
+      continue
+    }
+    kv[key] = val
+  }
+  const warnings = []
+  let tipster = (kv['tipster'] || kv['tipsters'] || kv['capper'] || '').trim() || null
+  if (!tipster && opts.defaultTipster) { tipster = opts.defaultTipster; warnings.push(`tipster "${tipster}" taken from the rest of the batch`) }
+  let date = parseDateToISO(kv['date'] || kv['fecha'])
+  if (!date && opts.defaultDate) { date = opts.defaultDate; warnings.push(`date ${date} taken from the rest of the batch`) }
+  const tipo    = (kv['tipo apuesta'] || kv['tipo de apuesta'] || kv['tipo'] || kv['type'] || kv['bet type'] || '').toLowerCase()
+  const isPar   = legs.length >= 2 || /parlay|combinada|combo|acca|accumulator|m[uú]ltiple|multiple/.test(tipo)
+  const topOdds = parseOddsToken(kv['odds'] || kv['cuota'] || kv['cuotas'] || kv['total odds'] || kv['cuota total'])
+  const stake   = parseStakeString(kv['stake'] || kv['monto'] || kv['apostado'] || kv['importe'])
+  const result  = parseResultToken(kv['resultado'] || kv['result'])
+  const partido = normMatchName(kv['partido'] || kv['match'] || kv['evento'] || kv['event'] || '')
+  const league  = kv['liga'] || kv['league'] || kv['competition'] || kv['competicion'] || kv['torneo'] || null
+  const weekHint = kv['week'] || kv['semana'] || kv['jornada'] || kv['round'] || kv['ronda'] || null
+  const globalBet = kv['global bet'] || null
+  const batchBet  = kv['batch bet'] || null
+
+  if (!tipster)     errors.push('missing tipster')
+  if (!date)        errors.push(kv['date'] || kv['fecha'] ? `unreadable date "${kv['date'] || kv['fecha']}"` : 'missing date')
+  if (!legs.length) errors.push('no picks under Apuesta:')
+  legs.forEach((l, i) => { if (!l.pick || !l.pick.trim()) errors.push(`leg ${i + 1} is empty`) })
+
+  // Match label
+  let match = partido && !/multi[\s-]?game|multi[\s-]?partido|varios/i.test(partido) ? partido : ''
+  if (!match && legs.length === 1 && legs[0].match) match = legs[0].match
+  if (!match && isPar) {
+    const names = legs.map(l => (l.match || l.pick || '').split(/\s+vs\s+/i)[0].trim()).filter(Boolean)
+    const shown = names.slice(0, 3).join(' + ')
+    match = `Parlay: ${shown}${names.length > 3 ? ` +${names.length - 3}` : ''}`
+  }
+  if (!match) match = legs[0] ? legs[0].pick : 'Unknown match'
+  if (!isPar && legs.length === 1 && !legs[0].match && partido && !/multi/i.test(partido)) legs[0].match = partido
+  if (!isPar && legs.length === 1 && !legs[0].competition && league) legs[0].competition = league
+
+  // Odds: top-level, else product of legs when every leg has odds
+  let odds = topOdds
+  if (odds == null && legs.length) {
+    const nums = legs.map(l => Number(l.odds))
+    if (nums.every(n => n > 1)) odds = round2(nums.reduce((a, n) => a * n, 1))
+  }
+
+  const notesParts = []
+  if (stake.raw)     notesParts.push(`Stake: ${stake.raw}`)
+  if (globalBet)     notesParts.push(`Global Bet: ${globalBet}`)
+  if (result === 'void') notesParts.push('Resultado: Nula')
+  if (kv['notas'] || kv['notes']) notesParts.push(kv['notas'] || kv['notes'])
+
+  const bet = {
+    _cid:            nextCid(),
+    _parse_path:     'local',
+    _extract_source: 'text',
+    match:            match,
+    pick:             isPar ? `Parlay — ${legs.length} legs` : (legs[0] ? legs[0].pick : ''),
+    odds:             odds,
+    stake:            stake.stake_cop,          // legacy field = COP amount (null when unknown)
+    stake_cop:        stake.stake_cop,
+    units:            stake.units,
+    stake_amount:     stake.stake_amount,
+    stake_currency:   stake.stake_currency,
+    stake_raw:        stake.raw,
+    bet_type:         isPar ? 'Parlay' : mapMarketToBetType(legs[0] ? legs[0].pick : ''),
+    competition:      isPar ? null : (legs[0]?.competition || league || null),
+    competition_type: null,
+    region:           null,
+    matchday:         matchdayFromText(weekHint) || null,
+    matchday_hint:    weekHint || league || null,
+    tipster:          tipster,
+    legs:             isPar ? legs.map(l => ({ pick: l.pick, odds: l.odds, match: l.match, competition: l.competition })) : null,
+    notes:            notesParts.join(' · ') || null,
+    date:             date,
+    result:           result,
+    global_bet:       globalBet,
+    batch_bet:        batchBet,
+    source_image:     null,
+    _warnings:        warnings.length ? warnings : null,
+    _raw:             String(block),
+  }
+  fillCompetitionLocal(bet)
+  if (opts.trackingOnly) { bet.bet_type = TRACKING_TYPE; bet.stake = null; bet.stake_cop = null }
+  return { ok: errors.length === 0, bet, errors }
+}
+
+// Parse a whole paste. Returns:
+//   { detected, bets[], failed[{index, text, errors}], total, blockCount, countMismatch }
+function parseStructuredBetText(text, opts = {}) {
+  const src = String(text || '').replace(/ /g, ' ')
+  const totalM = src.match(TOTAL_BETS_RE)
+  const total = totalM ? Number(totalM[1]) : null
+  const starts = []
+  const re = /^\s*(?:\d+[.)]\s*)?Batch Bet:\s*\d+\s+of\s+\d+/gmi
+  let m
+  while ((m = re.exec(src))) starts.push(m.index)
+  if (!starts.length) return { detected: false, bets: [], failed: [], total, blockCount: 0, countMismatch: false }
+  const blocks = starts.map((s, i) => src.slice(s, i + 1 < starts.length ? starts[i + 1] : undefined).trim())
+  // Pass 1: strict. Pass 2: blocks that only lack tipster/date borrow them
+  // from the rest of the batch when the batch is unambiguous (one tipster /
+  // one date across every block that parsed), so a bet is never dropped for
+  // a missing header line. Anything still failing goes to the AI / needs-info.
+  const first = blocks.map((blk, i) => ({ i, blk, r: parseStructuredBlock(blk, opts) }))
+  const okTipsters = [...new Set(first.filter(x => x.r.ok).map(x => x.r.bet.tipster).filter(Boolean))]
+  const okDates    = [...new Set(first.filter(x => x.r.ok).map(x => x.r.bet.date).filter(Boolean))]
+  const batchTipster = opts.defaultTipster || (okTipsters.length === 1 ? okTipsters[0] : null)
+  const batchDate    = okDates.length === 1 ? okDates[0] : null
+  const bets = [], failed = []
+  first.forEach(({ i, blk, r }) => {
+    if (!r.ok && (batchTipster || batchDate) && r.errors.every(e => /missing tipster|missing date/.test(e))) {
+      r = parseStructuredBlock(blk, { ...opts, defaultTipster: batchTipster || undefined, defaultDate: batchDate || undefined })
+    }
+    if (r.ok) bets.push(r.bet)
+    else failed.push({ index: i, text: blk, errors: r.errors, bet: r.bet })
+  })
+  return { detected: true, bets, failed, total, blockCount: blocks.length, countMismatch: total != null && blocks.length !== total }
+}
+
+// A "needs info" card: the block as the local parser best understood it, plus
+// the raw text so the user can fix it in place (or send just it to the AI).
+function makeNeedsInfoCard(f) {
+  const b = f.bet || { _cid: nextCid(), legs: null, match: 'Unknown', pick: '' }
+  return { ...b, _cid: b._cid || nextCid(), _parse_path: 'needs_info', _extract_source: 'text', _errors: f.errors || [], _raw: f.text || b._raw || '' }
+}
+function cardIsComplete(b) {
+  if (b._parse_path !== 'needs_info') return true
+  return !!(b.tipster && b.date && ((Array.isArray(b.legs) && b.legs.length) || (b.pick && b.pick.trim())))
+}
+
+// ── Dedupe keys (extracted card ↔ staged rows ↔ saved bets) ───────
+function dedupeKeyFromParts(tipster, date, match, pick) {
+  return [normKey(tipster), date || '', normKey(match), normKey(pick)].join('|')
+}
+function extractedDedupeKey(b) {
+  const isPar = Array.isArray(b.legs) && b.legs.length >= 2
+  const pick = isPar ? b.legs.map(l => l.pick || l.text || '').join(' + ') : (b.pick || '')
+  return dedupeKeyFromParts(b.tipster, b.date, b.match, pick)
+}
+function rowDedupeKey(row, dateField) {
+  if (row.dedupe_key) return row.dedupe_key
+  const pick = isParlayPick(row.pick) ? parseParlayLegs(row.pick).map(l => l.text).join(' + ') : (row.pick || '')
+  return dedupeKeyFromParts(row.tipster, row[dateField], row.match_name, pick)
+}
+function globalBetKey(tipster, date, globalBet) {
+  if (!globalBet) return null
+  return `g|${normKey(tipster)}|${date || ''}|${String(globalBet).replace(/\s+/g, '').toLowerCase()}`
+}
+// Build the lookup once per render: key → 'staged' | 'saved'
+function buildDedupeIndex() {
+  const idx = new Map()
+  for (const r of allBets) {
+    idx.set(rowDedupeKey(r, 'date'), 'saved')
+    const gm = String(r.notes || '').match(/Global Bet:\s*(\d+\s*of\s*\d+)/i)
+    if (gm) idx.set(globalBetKey(r.tipster, r.date, gm[1]), 'saved')
+  }
+  for (const r of stagedBets) {
+    idx.set(rowDedupeKey(r, 'date'), 'staged')
+    const gm = String(r.notes || '').match(/Global Bet:\s*(\d+\s*of\s*\d+)/i)
+    if (gm) idx.set(globalBetKey(r.tipster, r.date, gm[1]), 'staged')
+  }
+  return idx
+}
+function findDuplicateFor(b, idx) {
+  const k = extractedDedupeKey(b)
+  if (idx.has(k)) return idx.get(k)
+  const gk = globalBetKey(b.tipster, b.date, b.global_bet)
+  if (gk && idx.has(gk)) return idx.get(gk)
+  return null
+}
+
+// ══════════════════════════════════════════════════════════════════
+// AI FALLBACK — Haiku by default, no web search, forced tool-use JSON
+// ══════════════════════════════════════════════════════════════════
+// Used only for: non-standard pasted text, blocks the local parser rejected,
+// and screenshots. Static instructions live in `system` with cache_control so
+// the prefix is identical (and cacheable) across calls; everything that
+// changes per call (today, comments, batch metadata, the paste) goes in the
+// user message.
+
+const RECORD_BETS_TOOL = {
+  name: 'record_bets',
+  description: 'Record every American football (NFL / college) bet found in the input. Always call this tool exactly once with the full list (an empty list if nothing was found).',
+  input_schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['bets'],
+    properties: {
+      bets: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['match', 'pick', 'odds', 'bet_type', 'legs'],
+          properties: {
+            match:            { type: 'string',  description: '"Away @ Home" (or "Away vs Home") for singles. For parlays a short label like "Parlay: Team1 + Team2 + ...".' },
+            pick:             { type: 'string',  description: 'Selection text for singles. For parlays "Parlay — N legs".' },
+            odds:             { type: ['number', 'null'], description: 'DECIMAL odds (convert American/fractional). Combined odds for parlays. null if not shown.' },
+            date:             { type: ['string', 'null'], description: 'Date the bet refers to, YYYY-MM-DD. null if not shown — never guess.' },
+            tipster:          { type: ['string', 'null'], description: 'Tipster name if the text or user instructions name one, else null.' },
+            units:            { type: ['number', 'null'], description: 'Stake in units when written as e.g. "1.25U" / "2 units". null otherwise.' },
+            stake_amount:     { type: ['number', 'null'], description: 'Stake as a plain number when written as money (e.g. $100, 10.000,00€ → 10000). null otherwise.' },
+            stake_currency:   { type: ['string', 'null'], description: 'ISO code for stake_amount (USD, EUR, GBP, COP, CAD...). null if no money stake.' },
+            stake_raw:        { type: ['string', 'null'], description: 'The stake exactly as written, e.g. "1.25U" or "10.000,00€".' },
+            result:           { type: ['string', 'null'], enum: ['won', 'lost', 'void', null], description: 'Ganada→won, Perdida→lost, Nula→void. null if not stated.' },
+            bet_type:         { type: 'string',  enum: BET_TYPES, description: 'Closest market. "Parlay" for 2+ legs.' },
+            competition:      { type: ['string', 'null'], description: 'League / week / round as written in the text (e.g. "NFL Week 6", "Wild Card", "NCAA"), else null. Do not invent.' },
+            legs: {
+              type: ['array', 'null'],
+              description: 'For parlays: one entry per leg. null for singles.',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['pick'],
+                properties: {
+                  pick:        { type: 'string' },
+                  odds:        { type: ['number', 'null'], description: 'Decimal leg odds or null.' },
+                  match:       { type: ['string', 'null'] },
+                  competition: { type: ['string', 'null'] },
+                },
+              },
+            },
+            notes:            { type: ['string', 'null'], description: 'Promo, cash-out, bonus, lineup news, "Global Bet: x of y".' },
+            source_image:     { type: ['integer', 'null'], description: '1-based screenshot index, or null for pasted text.' },
+          },
+        },
+      },
+    },
+  },
+}
+
+// Static system prompt — no date, no per-batch data (keeps the cache prefix stable).
+function buildExtractSystemPrompt() {
+  return `You extract AMERICAN FOOTBALL bets (NFL, college football, UFL/CFL) from screenshots or pasted text and record them with the record_bets tool. 🏈
+
+Rules:
+- Call record_bets exactly once with every bet found. Never answer in prose.
+- Each independent bet is one element. The same bet seen in several screenshots is ONE element.
+- Odds must be DECIMAL. Convert: American +X → 1 + X/100, -X → 1 + 100/X. Fractional a/b → 1 + a/b (1/1 = 2.00, 2.6/1 = 3.60). Decimal values may use a comma.
+- Stakes: "1.25U" / "2 units" → units (never put that number in stake_amount). Money stakes → stake_amount + stake_currency (parse European "10.000,00" = 10000 and US "1,000.50" = 1000.5). Always copy the stake exactly as written into stake_raw. If no stake is shown, leave units/stake_amount null — do NOT infer that the bet is tracking-only.
+- Dates: output YYYY-MM-DD only when a date is shown (e.g. "09-Oct-2026" → "2026-10-09"). Otherwise null.
+- Tipster: fill from the text ("Tipster: X") or from the user instructions; otherwise null.
+- Resultado / result: Ganada → "won", Perdida → "lost", Nula → "void", otherwise null.
+- Games are written "Away @ Home" (e.g. "Bills @ Chiefs"). Keep that order in match; "Away vs Home" is also fine.
+- Lines are NOT odds: "Chiefs -3.5", "Over 47.5", "Mahomes Over 275.5 pass yds", "Alt spread +7.5" keep the number inside pick. Odds are the separate price (e.g. -110, +150, 1.91).
+- PARLAYS / SGP: 2+ picks in one ticket (keywords parlay, SGP, same game parlay, combo, múltiple, combinada, or a list of 2+ independent picks). Set bet_type "Parlay", pick "Parlay — N legs", match to a short label, and ALWAYS fill legs[] with per-leg pick / odds / match / competition. Keep each leg's own game and week.
+- bet_type for singles: the closest value from the enum (Moneyline, Point Spread, Total Points (Over/Under), Team Total Points, 1st Half — Spread, Anytime Touchdown Scorer, QB Passing Yards, Rushing Yards, Receiving Yards, Receptions, Field Goals Made, Sacks, Same Game Parlay, Futures...). Use "Other" when unsure. Use "Tracking (Win %)" ONLY if the user instructions explicitly say the batch is tracking-only.
+- competition / week: copy the league, week or round only when it is written in the input (e.g. "NFL Week 6", "SNF", "Wild Card", "NCAA"). Do not research or guess. There is no web search.
+- Follow the USER INSTRUCTIONS block: it may set the tipster, the sportsbook, the currency, or which parts to focus on. Apply such overrides to EVERY bet.`
+}
+
+function estimateMaxTokens(nBets) {
+  const n = Math.max(1, Number(nBets) || 1)
+  return Math.min(4000, Math.max(900, 350 * n))
+}
+function estimateBetCount(text) {
+  const blocks = (String(text || '').match(/^\s*Batch Bet:/gmi) || []).length
+  if (blocks) return blocks
+  const bullets = (String(text || '').match(/^\s*(?:[-•*]|\d+[.)])\s+/gm) || []).length
+  return Math.max(1, Math.min(12, bullets || Math.ceil(String(text || '').length / 400)))
+}
+
+// One paid call. Never retries. Aborts after AI_TIMEOUT_MS.
+async function callClaudeExtract({ apiKey, model, userContent, maxTokens, allowSearch = false }) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS)
+  try {
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: maxTokens,
+        system: [{ type: 'text', text: buildExtractSystemPrompt(), cache_control: { type: 'ephemeral' } }],
+        // Default: forced record_bets, no search. For blocks the local parser
+        // rejected the user asked that missing info be looked up, so those calls
+        // may run up to 3 web searches before recording (tool_choice must then
+        // be 'auto' — a forced tool blocks the search tool).
+        tools: allowSearch ? [RECORD_BETS_TOOL, { type: 'web_search_20250305', name: 'web_search', max_uses: 3 }] : [RECORD_BETS_TOOL],
+        tool_choice: allowSearch ? { type: 'auto' } : { type: 'tool', name: 'record_bets' },
+        messages: [{ role: 'user', content: userContent }],
+      }),
+    })
+    const data = await resp.json().catch(() => ({}))
+    if (!resp.ok) throw new Error(data?.error?.message || ('API error ' + resp.status))
+    if (data.stop_reason === 'max_tokens') {
+      throw new Error(`Output truncated (hit max_tokens=${maxTokens}). Split the paste into smaller batches and parse again — this call was NOT retried.`)
+    }
+    const tu = (data.content || []).find(c => c.type === 'tool_use' && c.name === 'record_bets')
+    if (!tu || !tu.input || !Array.isArray(tu.input.bets)) {
+      throw new Error(`The model returned no structured bets (stop_reason: ${data.stop_reason || '?'}).`)
+    }
+    return { bets: tu.input.bets, usage: data.usage || null, model }
+  } catch (err) {
+    if (err && err.name === 'AbortError') throw new Error(`Request timed out after ${AI_TIMEOUT_MS / 1000}s. Nothing was retried — check your connection and click again if you want to pay for another attempt.`)
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// Bring an AI-returned bet into the same shape the local parser produces.
+function normalizeAiBet(raw, { trackingOnly, source }) {
+  const b = { ...raw }
+  b._cid = nextCid()
+  b._parse_path = 'ai'
+  b._extract_source = source
+  b.odds = b.odds != null && Number(b.odds) >= 1 ? Number(b.odds) : null
+  b.date = parseDateToISO(b.date) || null
+  b.result = parseResultToken(b.result) || null
+  b.legs = Array.isArray(b.legs) && b.legs.length >= 2
+    ? b.legs.map(l => ({ pick: l.pick || l.text || '', odds: l.odds != null && Number(l.odds) >= 1 ? Number(l.odds) : null, match: l.match ? normMatchName(l.match) : null, competition: l.competition || l.tournament || null }))
+    : null
+  if (b.match) b.match = normMatchName(b.match)
+  // Stake normalisation — prefer the raw string when we have it (deterministic).
+  let stake = parseStakeString(b.stake_raw)
+  if (stake.units == null && stake.stake_amount == null) {
+    if (b.units != null && Number(b.units) > 0) {
+      stake = { raw: b.stake_raw || `${b.units}U`, units: Number(b.units), stake_amount: null, stake_currency: null, stake_cop: Math.round(Number(b.units) * UNIT_COP) }
+    } else if (b.stake_amount != null && Number(b.stake_amount) > 0) {
+      const code = String(b.stake_currency || 'COP').toUpperCase()
+      const fx = loadFxRates()
+      stake = { raw: b.stake_raw || `${b.stake_amount} ${code}`, units: null, stake_amount: Number(b.stake_amount), stake_currency: code,
+                stake_cop: code === 'COP' ? Math.round(Number(b.stake_amount)) : (Number(fx[code]) > 0 ? Math.round(Number(b.stake_amount) * Number(fx[code])) : null) }
+    } else if (b.stake != null && Number(b.stake) > 0) {
+      // Legacy "stake" number from older prompts → treated as COP
+      stake = { raw: String(b.stake), units: null, stake_amount: Number(b.stake), stake_currency: 'COP', stake_cop: Math.round(Number(b.stake)) }
+    }
+  }
+  b.units = stake.units; b.stake_amount = stake.stake_amount; b.stake_currency = stake.stake_currency
+  b.stake_raw = stake.raw; b.stake_cop = stake.stake_cop; b.stake = stake.stake_cop
+  if (b.legs) { b.bet_type = 'Parlay'; if (!b.pick || !/parlay/i.test(b.pick)) b.pick = `Parlay — ${b.legs.length} legs` }
+  else if (!b.bet_type || !BET_TYPES.includes(b.bet_type)) b.bet_type = mapMarketToBetType(b.pick)
+  if (b.bet_type === TRACKING_TYPE && !trackingOnly) b.bet_type = b.legs ? 'Parlay' : mapMarketToBetType(b.pick)
+  if (trackingOnly) { b.bet_type = TRACKING_TYPE; b.stake = null; b.stake_cop = null }
+  fillCompetitionLocal(b)
+  return b
+}
+
+// ── Result cache (localStorage) — identical input → free re-parse ──
+async function sha256Hex(str) {
+  try {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))
+    return Array.from(new Uint8Array(buf)).map(x => x.toString(16).padStart(2, '0')).join('')
+  } catch {
+    let h = 0; for (let i = 0; i < str.length; i++) h = (Math.imul(31, h) + str.charCodeAt(i)) | 0
+    return 'fnv' + (h >>> 0).toString(16) + str.length
+  }
+}
+function loadParseCache() { try { const o = JSON.parse(localStorage.getItem(PARSE_CACHE_KEY) || '{}'); return o && typeof o === 'object' ? o : {} } catch { return {} } }
+function saveParseCache(obj) {
+  try {
+    const keys = Object.keys(obj).sort((a, b) => (obj[a].ts || 0) - (obj[b].ts || 0))
+    while (keys.length > PARSE_CACHE_MAX) delete obj[keys.shift()]
+    localStorage.setItem(PARSE_CACHE_KEY, JSON.stringify(obj))
+  } catch {}
+}
+async function parseCacheKey(model, pasted, comments, trackingFlag) {
+  return sha256Hex(`${model}\u0000${pasted}\u0000${comments}\u0000${trackingFlag ? 1 : 0}\u0000${buildTipsterBatchInstructions()}`)
+}
+window.clearParseCache = function() {
+  try { localStorage.removeItem(PARSE_CACHE_KEY) } catch {}
+  toast('Parse cache cleared', 'success')
+}
+
+// ── Import settings (model + FX) ───────────────────────────────────
+window.saveImportModel = function(kind, v) {
+  const key = kind === 'image' ? IMPORT_MODEL_IMAGE_KEY : IMPORT_MODEL_TEXT_KEY
+  try { if (v && v.trim()) localStorage.setItem(key, v.trim()); else localStorage.removeItem(key) } catch {}
+}
+window.saveFxRate = function(code, v) {
+  const fx = loadFxRates()
+  const n = parseLocaleNumber(v)
+  if (n && n > 0) fx[code] = n; else delete fx[code]
+  saveFxRates(fx)
+}
+
+function setParseButtonsBusy(busy, label) {
+  parseInFlight = !!busy
+  document.querySelectorAll('[data-parse-btn]').forEach(btn => {
+    if (busy) { btn.dataset.origLabel = btn.dataset.origLabel || btn.textContent; btn.disabled = true; if (label && btn.dataset.parseBtn === 'text') btn.textContent = label }
+    else { btn.disabled = false; if (btn.dataset.origLabel) btn.textContent = btn.dataset.origLabel }
+  })
 }
 
 window.extractBetsFromScreenshot = async function() {
+  if (parseInFlight) return
   const apiKey = (document.getElementById('f-api-key').value || '').trim()
   if (!apiKey) { toast('Enter your Anthropic API key first', 'error'); return }
   saveApiKey(apiKey)
@@ -5466,9 +6374,12 @@ window.extractBetsFromScreenshot = async function() {
   const saveDefault = document.getElementById('f-save-default-comments').checked
   if (saveDefault && comments) localStorage.setItem('ocrDefaultComments', comments)
   else if (!saveDefault)       localStorage.removeItem('ocrDefaultComments')
+  const trackingOnly = !!document.getElementById('f-paste-tracking')?.checked
+  const model = getImportModel('image')
 
   const resultsDiv = document.getElementById('extract-results')
-  resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div></div>`
+  resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div><div style="font-size:11px;color:var(--gray-400);font-family:var(--font-mono);margin-top:8px;">🤖 ${escapeHtml(model)} · ${screenshotFiles.length} image${screenshotFiles.length !== 1 ? 's' : ''} · no web search · 60 s timeout</div></div>`
+  setParseButtonsBusy(true)
 
   try {
     const content = []
@@ -5476,53 +6387,44 @@ window.extractBetsFromScreenshot = async function() {
       const f   = screenshotFiles[i]
       const b64 = await fileToBase64(f)
       content.push({ type: 'text', text: `--- Screenshot #${i + 1} (${f.name || 'image'}) ---` })
-      content.push({
-        type: 'image',
-        source: { type: 'base64', media_type: f.type || 'image/png', data: b64 },
-      })
+      content.push({ type: 'image', source: { type: 'base64', media_type: f.type || 'image/png', data: b64 } })
     }
-    content.push({
-      type: 'text',
-      text: `${buildExtractPrompt()}\n\n--- USER INSTRUCTIONS FOR THIS BATCH ---\n${comments || '(none provided)'}${buildTipsterBatchInstructions()}`
-    })
-
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 6000,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }],
-        messages: [{ role: 'user', content }],
-      }),
-    })
-
-    const data = await resp.json()
-    if (!resp.ok) throw new Error(data?.error?.message || ('API error ' + resp.status))
-
-    const text      = (data.content || []).map(c => c.text || '').join('\n').trim()
-    const jsonMatch = text.match(/\[[\s\S]*\]/)
-    const parsed    = JSON.parse(jsonMatch ? jsonMatch[0] : text)
-    extractedBets   = (Array.isArray(parsed) ? parsed : [parsed]).map(b => ({ ...b, _extract_source: 'image' }))
+    content.push({ type: 'text', text: buildUserInstructionsBlock(comments, trackingOnly) })
+    const { bets } = await callClaudeExtract({ apiKey, model, userContent: content, maxTokens: estimateMaxTokens(screenshotFiles.length * 4) })
+    extractedBets = bets.map(b => normalizeAiBet(b, { trackingOnly, source: 'image' }))
+    persistExtractedBets()
     renderExtractedBets(extractedBets, comments)
   } catch (err) {
-    resultsDiv.innerHTML = `
-      <div class="reader-card" style="border-color:var(--red-md); background:var(--red-lt);">
-        <h3 style="color:var(--red);">❌ Extraction failed</h3>
-        <div style="font-size:12px; color:var(--gray-900);">${escapeHtml(err.message)}</div>
-        <div style="font-size:10px; color:var(--gray-600); margin-top:7px; font-family:var(--font-mono);">
-          Common causes: invalid API key · images too large · API outage · CORS blocked by browser extension.
-        </div>
-      </div>`
+    renderExtractError('❌ Extraction failed', err.message, 'Common causes: invalid API key · images too large · API outage · CORS blocked by browser extension.')
+  } finally {
+    setParseButtonsBusy(false)
   }
 }
 
+// Per-call block: today + user comments + tracking directive + batch metadata.
+function buildUserInstructionsBlock(comments, trackingOnly) {
+  const trackingDirective = trackingOnly
+    ? `\n\nIMPORTANT — USER HAS MARKED THIS BATCH AS TRACKING-ONLY: every bet has no stake. Set bet_type = "Tracking (Win %)", units/stake_amount = null. Still detect parlays and fill legs[].`
+    : ''
+  return `Current date: ${todayLocalISO()} (use only to resolve relative dates; never invent a date).
+
+--- USER INSTRUCTIONS FOR THIS BATCH ---
+${comments || '(none provided)'}${trackingDirective}${buildTipsterBatchInstructions()}`
+}
+
+function renderExtractError(title, message, hint) {
+  const resultsDiv = document.getElementById('extract-results')
+  if (!resultsDiv) return
+  resultsDiv.innerHTML = `
+    <div class="reader-card" style="border-color:var(--red-md); background:var(--red-lt);">
+      <h3 style="color:var(--red);">${title}</h3>
+      <div style="font-size:12px; color:var(--gray-900);">${escapeHtml(message)}</div>
+      ${hint ? `<div style="font-size:10px; color:var(--gray-600); margin-top:7px; font-family:var(--font-mono);">${hint}</div>` : ''}
+    </div>`
+}
+
 window.extractBetsFromScreenshotOpenAI = async function() {
+  if (parseInFlight) return
   const apiKey = (document.getElementById('f-openai-key').value || '').trim()
   if (!apiKey) { toast('Enter your OpenAI API key first', 'error'); return }
   saveOpenAIKey(apiKey)
@@ -5532,79 +6434,60 @@ window.extractBetsFromScreenshotOpenAI = async function() {
   const saveDefault = document.getElementById('f-save-default-comments').checked
   if (saveDefault && comments) localStorage.setItem('ocrDefaultComments', comments)
   else if (!saveDefault)       localStorage.removeItem('ocrDefaultComments')
+  const trackingOnly = !!document.getElementById('f-paste-tracking')?.checked
 
   const resultsDiv = document.getElementById('extract-results')
   resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div></div>`
+  setParseButtonsBusy(true)
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), AI_TIMEOUT_MS)
 
   try {
-    // Build OpenAI Responses-API multimodal input blocks. Images go inline as
-    // data URLs in the `image_url` string field (unlike Chat Completions which
-    // wraps it in an object).
     const userContent = []
     for (let i = 0; i < screenshotFiles.length; i++) {
       const f    = screenshotFiles[i]
       const b64  = await fileToBase64(f)
       const mime = f.type || 'image/png'
       userContent.push({ type: 'input_text', text: `--- Screenshot #${i + 1} (${f.name || 'image'}) ---` })
-      userContent.push({
-        type: 'input_image',
-        image_url: `data:${mime};base64,${b64}`,
-        detail: 'high',
-      })
+      userContent.push({ type: 'input_image', image_url: `data:${mime};base64,${b64}`, detail: 'high' })
     }
-    userContent.push({
-      type: 'input_text',
-      text: `${buildExtractPrompt()}\n\n--- USER INSTRUCTIONS FOR THIS BATCH ---\n${comments || '(none provided)'}${buildTipsterBatchInstructions()}\n\nReminder: Use the web_search tool aggressively to validate every match-up and fill competition / region / matchday when not visible in the images. Your FINAL output must be ONLY the JSON array — no prose, no markdown.`
-    })
+    userContent.push({ type: 'input_text', text: `${buildExtractSystemPrompt()}\n\n${buildUserInstructionsBlock(comments, trackingOnly)}\n\nReturn ONLY a JSON object {"bets": [...]} matching the record_bets schema. No prose, no markdown, no web search.` })
 
     const resp = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'content-type': 'application/json',
-      },
+      signal: ctrl.signal,
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'content-type': 'application/json' },
       body: JSON.stringify({
         model: 'gpt-4o',
-        max_output_tokens: 6000,
-        tools: [{ type: 'web_search' }],
+        max_output_tokens: estimateMaxTokens(screenshotFiles.length * 4),
+        text: { format: { type: 'json_schema', name: 'record_bets', schema: RECORD_BETS_TOOL.input_schema, strict: false } },
         input: [{ role: 'user', content: userContent }],
       }),
     })
-
-    const data = await resp.json()
+    const data = await resp.json().catch(() => ({}))
     if (!resp.ok) throw new Error(data?.error?.message || ('OpenAI API error ' + resp.status))
-
-    // Extract text from the Responses-API output[] array. Prefer the
-    // top-level `output_text` convenience field if the SDK populated it,
-    // otherwise walk output[] for the assistant message and concatenate
-    // every output_text content block.
+    if (data.status === 'incomplete' && data.incomplete_details?.reason === 'max_output_tokens') {
+      throw new Error('Output truncated (max_output_tokens). Use fewer screenshots per batch — this call was NOT retried.')
+    }
     let text = (typeof data.output_text === 'string' && data.output_text) || ''
     if (!text && Array.isArray(data.output)) {
       const chunks = []
-      for (const item of data.output) {
-        if (item?.type === 'message' && Array.isArray(item.content)) {
-          for (const c of item.content) {
-            if (c?.type === 'output_text' && typeof c.text === 'string') chunks.push(c.text)
-          }
-        }
-      }
+      for (const item of data.output) if (item?.type === 'message' && Array.isArray(item.content))
+        for (const c of item.content) if (c?.type === 'output_text' && typeof c.text === 'string') chunks.push(c.text)
       text = chunks.join('\n').trim()
     }
-    if (!text) throw new Error('OpenAI returned no text output (web_search may have failed silently — check the dashboard).')
-
-    const jsonMatch = text.match(/\[[\s\S]*\]/)
-    const parsed    = JSON.parse(jsonMatch ? jsonMatch[0] : text)
-    extractedBets   = (Array.isArray(parsed) ? parsed : [parsed]).map(b => ({ ...b, _extract_source: 'image' }))
+    if (!text) throw new Error('OpenAI returned no text output.')
+    const parsed = JSON.parse(text)
+    const bets = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.bets) ? parsed.bets : [parsed])
+    extractedBets = bets.map(b => normalizeAiBet(b, { trackingOnly, source: 'image' }))
+    persistExtractedBets()
     renderExtractedBets(extractedBets, comments)
   } catch (err) {
-    resultsDiv.innerHTML = `
-      <div class="reader-card" style="border-color:var(--red-md); background:var(--red-lt);">
-        <h3 style="color:var(--red);">❌ Extraction failed (ChatGPT)</h3>
-        <div style="font-size:12px; color:var(--gray-900);">${escapeHtml(err.message)}</div>
-        <div style="font-size:10px; color:var(--gray-600); margin-top:7px; font-family:var(--font-mono);">
-          Common causes: invalid OpenAI API key · images too large · API outage · CORS blocked by browser extension · web_search not enabled on your OpenAI org · model lacks vision (use gpt-4o).
-        </div>
-      </div>`
+    const msg = err?.name === 'AbortError' ? `Request timed out after ${AI_TIMEOUT_MS / 1000}s (not retried).` : err.message
+    renderExtractError('❌ Extraction failed (ChatGPT)', msg, 'Common causes: invalid OpenAI API key · images too large · API outage · CORS blocked by browser extension · model lacks vision (use gpt-4o).')
+  } finally {
+    clearTimeout(timer)
+    setParseButtonsBusy(false)
   }
 }
 
@@ -5630,116 +6513,170 @@ window.clearCommentsInstructions = function() {
   toast('Comments / instructions cleared', 'success')
 }
 
-// Parse one or more bets out of pasted free-form text. Reuses the same
-// extraction prompt + output schema as the screenshot path so the preview and
-// "open in Add Bet form" flow work identically.
-window.parseBetsFromText = async function() {
-  const apiKey = (document.getElementById('f-api-key').value || '').trim()
-  if (!apiKey) { toast('Enter your Anthropic API key first', 'error'); return }
-  saveApiKey(apiKey)
-
+// ── PARSE TEXT ─────────────────────────────────────────────────────
+// 1) Local deterministic parser (free, <1 s) for the standard batch format.
+// 2) AI (Haiku by default) ONLY for blocks the local parser rejected, or for
+//    text that isn't in the standard format at all.
+// 3) Identical AI inputs are served from a localStorage cache (free).
+// `force` = true  → "Re-parse (paid)": bypass the cache for the AI part.
+// `aiWholePaste` = true → user explicitly asked to send the full paste to the AI.
+window.parseBetsFromText = async function(opts = {}) {
+  if (parseInFlight) return
   const pasted = (document.getElementById('f-paste-text').value || '').trim()
   if (!pasted) { toast('Paste some bet text first', 'error'); return }
 
-  const trackingOnly = document.getElementById('f-paste-tracking').checked
+  const trackingOnly = !!document.getElementById('f-paste-tracking').checked
   const comments     = (document.getElementById('f-ocr-comments').value || '').trim()
   const saveDefault  = document.getElementById('f-save-default-comments').checked
   if (saveDefault && comments) localStorage.setItem('ocrDefaultComments', comments)
   else if (!saveDefault)       localStorage.removeItem('ocrDefaultComments')
 
   const resultsDiv = document.getElementById('extract-results')
-  resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div></div>`
-
-  const trackingDirective = trackingOnly
-    ? `\n\nIMPORTANT — USER HAS MARKED THIS AS TRACKING-ONLY:
-- Treat EVERY bet as tracking-only (no stake).
-- Set stake = null, odds = null (for the top-level bet), bet_type = "Tracking (Win %)".
-- Still detect parlays and populate legs[]. Per-leg odds are optional; include them only if present in the pasted text.`
-    : ''
-
-  const fullPrompt = `${buildExtractPrompt()}
-
---- USER INSTRUCTIONS FOR THIS BATCH ---
-${comments || '(none provided)'}${trackingDirective}${buildTipsterBatchInstructions()}
-
---- PASTED TEXT TO PARSE (there are no images this time; source_image should be null for every bet) ---
-${pasted}`
+  const t0 = performance.now()
+  setParseButtonsBusy(true, '⏳ Parsing…')
+  const banners = []
 
   try {
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 6000,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }],
-        messages: [{ role: 'user', content: [{ type: 'text', text: fullPrompt }] }],
-      }),
-    })
+    // Default tipster when the batch metadata names exactly one tipster.
+    const batchTipsters = tipsterBatch.rows.map(r => r.tipster).filter(Boolean)
+    const defaultTipster = batchTipsters.length === 1 ? batchTipsters[0] : null
 
-    const data = await resp.json()
-    if (!resp.ok) throw new Error(data?.error?.message || ('API error ' + resp.status))
+    let localBets = [], aiTargets = null   // aiTargets: text to send to the AI (null = nothing)
+    const local = opts.aiWholePaste ? { detected: false, bets: [], failed: [] } : parseStructuredBetText(pasted, { trackingOnly, defaultTipster })
 
-    const text      = (data.content || []).map(c => c.text || '').join('\n').trim()
-    const jsonMatch = text.match(/\[[\s\S]*\]/)
-    const parsed    = JSON.parse(jsonMatch ? jsonMatch[0] : text)
-    let bets        = Array.isArray(parsed) ? parsed : [parsed]
-
-    // If the user flagged tracking-only, force-normalize every bet so the
-    // preview and Add-Bet form pre-fill into Win% mode even if the model
-    // forgot to set bet_type.
-    if (trackingOnly) {
-      bets = bets.map(b => ({
-        ...b,
-        bet_type: 'Tracking (Win %)',
-        stake:    null,
-        odds:     null,
-      }))
+    if (local.detected) {
+      localBets = local.bets
+      if (local.countMismatch) {
+        banners.push({ kind: 'warn', text: `TOTAL BETS says ${local.total} but the paste has ${local.blockCount} "Batch Bet" block${local.blockCount !== 1 ? 's' : ''}. Check the source — nothing was sent to the AI for this.` })
+      }
+      const borrowed = localBets.filter(b => b._warnings && b._warnings.length)
+      if (borrowed.length) banners.push({ kind: 'warn', text: `${borrowed.length} block${borrowed.length !== 1 ? 's' : ''} lacked a header line and borrowed it from the batch: ${[...new Set(borrowed.flatMap(b => b._warnings))].join('; ')}. Check those cards.` })
+      if (local.failed.length) {
+        const blocksTxt = local.failed.map(f => `### BLOCK ${f.index + 1} (local parser said: ${f.errors.join('; ')})\n${f.text}`).join('\n\n')
+        aiTargets = {
+          text: `--- FULL BATCH (context only — do NOT record these, they are already parsed) ---\n${pasted}\n\n--- BLOCKS TO EXTRACT (record EXACTLY ${local.failed.length} bet${local.failed.length !== 1 ? 's' : ''}, one per block, in this order) ---\n${blocksTxt}\n\nThe listed blocks are missing or garbled fields. Recover them from the block itself, from the full-batch context (same tipster/date pattern, "Global Bet" numbering), or — only if still unknown — with web_search (e.g. the fixture date). Never return fewer bets than blocks; if a field is truly unknowable leave it null but still record the bet.`,
+          count: local.failed.length, reason: 'failed blocks (with batch context + search)', failed: local.failed, allowSearch: true,
+        }
+        banners.push({ kind: 'warn', text: `${local.failed.length} block${local.failed.length !== 1 ? 's' : ''} failed local validation (${[...new Set(local.failed.flatMap(f => f.errors))].join('; ')}) — sent to the AI with the full batch as context.` })
+      }
+    } else {
+      aiTargets = { text: pasted, count: estimateBetCount(pasted), reason: opts.aiWholePaste ? 'manual AI parse' : 'non-standard format', allowSearch: !!opts.aiWholePaste }
     }
 
-    extractedBets = bets.map(b => ({ ...b, _extract_source: 'text' }))
-    renderExtractedBets(extractedBets, comments)
+    let aiBets = []
+    let needsInfo = []
+    if (aiTargets) {
+      const apiKey = (document.getElementById('f-api-key').value || '').trim()
+      if (!apiKey) {
+        if (localBets.length) banners.push({ kind: 'warn', text: 'No Anthropic API key — the failed blocks are kept below as "⚠ Needs info" cards. Add a key in 🔐 API Keys to parse them with the AI, or fix them by hand.' })
+        else throw new Error('This text is not in the standard batch format and no Anthropic API key is set. Add a key in 🔐 API Keys, or paste text in the "TOTAL BETS / Batch Bet" format.')
+      } else try {
+        saveApiKey(apiKey)
+        const model = getImportModel('text')
+        const cacheKey = await parseCacheKey(model, aiTargets.text, comments, trackingOnly)
+        const cache = loadParseCache()
+        if (!opts.force && cache[cacheKey] && Array.isArray(cache[cacheKey].bets)) {
+          aiBets = cache[cacheKey].bets.map(b => ({ ...b, _cid: nextCid(), _parse_path: 'ai', _from_cache: true }))
+          banners.push({ kind: 'info', text: `🤖 ${aiBets.length} card${aiBets.length !== 1 ? 's' : ''} served from cache (identical text parsed before — no API cost).`, reparse: true })
+        } else {
+          resultsDiv.innerHTML = `<div class="loading"><div class="spinner"></div><div style="font-size:11px;color:var(--gray-400);font-family:var(--font-mono);margin-top:8px;">🤖 ${escapeHtml(model)} · ${aiTargets.reason} · ${aiTargets.count} bet${aiTargets.count !== 1 ? 's' : ''} · no web search · 60 s timeout</div></div>`
+          const userContent = [{ type: 'text', text: `${buildUserInstructionsBlock(comments, trackingOnly)}\n\n--- PASTED TEXT TO PARSE (no images; source_image must be null) ---\n${aiTargets.text}` }]
+          const { bets, usage } = await callClaudeExtract({ apiKey, model, userContent, maxTokens: estimateMaxTokens(aiTargets.count), allowSearch: !!aiTargets.allowSearch })
+          aiBets = bets.map(b => normalizeAiBet(b, { trackingOnly, source: 'text' }))
+          if (aiBets.length) { cache[cacheKey] = { bets: aiBets, ts: Date.now(), model }; saveParseCache(cache) }
+          const u = usage ? ` · ${usage.input_tokens || 0} in / ${usage.output_tokens || 0} out tokens${usage.cache_read_input_tokens ? ` (${usage.cache_read_input_tokens} cached)` : ''}${usage.server_tool_use?.web_search_requests ? ` · ${usage.server_tool_use.web_search_requests} web search${usage.server_tool_use.web_search_requests !== 1 ? 'es' : ''}` : ''}` : ''
+          banners.push({ kind: 'info', text: `🤖 ${aiBets.length} card${aiBets.length !== 1 ? 's' : ''} from ${model}${u}.`, reparse: true })
+        }
+      } catch (aiErr) {
+        banners.push({ kind: 'warn', text: `AI step failed: ${aiErr.message}` })
+      }
+      // Never drop a block: anything the AI didn't return comes back as a
+      // "⚠ Needs info" card with its raw text, ready to fix / retry.
+      if (aiTargets.failed && aiBets.length < aiTargets.failed.length) {
+        const missing = aiTargets.failed.slice(aiBets.length)   // AI records blocks in order
+        needsInfo = missing.map(makeNeedsInfoCard)
+        banners.push({ kind: 'warn', text: `${needsInfo.length} block${needsInfo.length !== 1 ? 's' : ''} still unresolved — kept as "⚠ Needs info" card${needsInfo.length !== 1 ? 's' : ''} below. Edit the text in the card and hit ↻, or 🤖 to retry just that block.` })
+      }
+    }
+
+    extractedBets = [...localBets, ...aiBets, ...needsInfo]
+    persistExtractedBets()
+    const ms = Math.round(performance.now() - t0)
+    if (localBets.length) banners.unshift({ kind: 'ok', text: `⚡ ${localBets.length} card${localBets.length !== 1 ? 's' : ''} parsed locally in ${ms} ms — zero API calls${local.total != null ? ` · TOTAL BETS: ${local.total}` : ''}.` })
+    renderExtractedBets(extractedBets, comments, banners)
   } catch (err) {
-    resultsDiv.innerHTML = `
-      <div class="reader-card" style="border-color:var(--red-md); background:var(--red-lt);">
-        <h3 style="color:var(--red);">❌ Parse failed</h3>
-        <div style="font-size:12px; color:var(--gray-900);">${escapeHtml(err.message)}</div>
-        <div style="font-size:10px; color:var(--gray-600); margin-top:7px; font-family:var(--font-mono);">
-          Common causes: invalid API key · API outage · CORS blocked by browser extension.
-        </div>
-      </div>`
+    renderExtractError('❌ Parse failed', err.message, 'Common causes: invalid API key · API outage · CORS blocked by browser extension.')
+  } finally {
+    setParseButtonsBusy(false)
   }
 }
 
-function renderExtractedBets(bets, comments) {
+// ── EXTRACTED CARDS ────────────────────────────────────────────────
+function fmtStakeForCard(b) {
+  const parts = []
+  if (b.units != null) parts.push(`${Number(b.units)}U`)
+  if (b.stake_amount != null && b.stake_currency) parts.push(`${Number(b.stake_amount).toLocaleString('es-CO')} ${b.stake_currency}`)
+  if (b.stake_cop != null) parts.push(COP(b.stake_cop))
+  else if (b.stake_currency && b.stake_currency !== 'COP') parts.push(`<span style="color:var(--gray-400)">(no FX rate for ${escapeHtml(b.stake_currency)} → COP left blank)</span>`)
+  if (!parts.length) return '—'
+  return parts.join(' <span style="color:var(--gray-400)">·</span> ')
+}
+function resultChip(result) {
+  if (result === 'won')  return `<span class="extract-badge" style="background:#dcfce7;color:#166534;">✅ Won</span>`
+  if (result === 'lost') return `<span class="extract-badge" style="background:#fee2e2;color:#991b1b;">❌ Lost</span>`
+  if (result === 'void') return `<span class="extract-badge" style="background:var(--gray-100);color:var(--gray-600);">⬜ Void</span>`
+  return ''
+}
+
+function renderExtractedBets(bets, comments, banners = []) {
   const resultsDiv = document.getElementById('extract-results')
+  if (!resultsDiv) return
+  const bannerHtml = banners.map(bn => {
+    const col = bn.kind === 'ok' ? 'background:#dcfce7;color:#166534;border-color:#86efac;'
+              : bn.kind === 'warn' ? 'background:#fef3c7;color:#92400e;border-color:#fcd34d;'
+              : 'background:var(--blue-lt);color:var(--blue-dk);border-color:var(--blue-md, #bfdbfe);'
+    return `<div style="${col} border:1px solid; border-radius:8px; padding:7px 10px; font-size:11.5px; margin-bottom:6px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <span style="flex:1;">${escapeHtml(bn.text)}</span>
+      ${bn.reparse ? `<button class="btn btn-secondary btn-sm" onclick="parseBetsFromText({force:true})" title="Bypass the cache and pay for a fresh AI parse">🔁 Re-parse (paid)</button>` : ''}
+    </div>`
+  }).join('')
+
   if (!bets.length) {
-    resultsDiv.innerHTML = `
+    resultsDiv.innerHTML = `${bannerHtml}
       <div class="reader-card">
         <h3>🤷 No bets detected</h3>
         <div style="font-size:12px; color:var(--gray-600);">
-          The model didn't find any bets in this input. Try adding more specific instructions in the Comments box, or clean up the pasted text / screenshot.
+          Nothing parseable in this input. For the standard format each bet needs <code>Batch Bet: i of N</code>, <code>Tipster:</code>, <code>Date:</code> and at least one <code>- pick</code> under <code>Apuesta:</code>.
+          <button class="btn btn-secondary btn-sm" style="margin-left:8px;" onclick="parseBetsFromText({aiWholePaste:true})">🤖 Parse whole paste with AI (paid)</button>
         </div>
       </div>`
     return
   }
 
-  const cards = bets.map((b, i) => {
+  const dupIdx = buildDedupeIndex()
+  let dupCount = 0
+  const cards = bets.map(b => {
     const isPar = Array.isArray(b.legs) && b.legs.length >= 2
-    const isTracking = b.bet_type === TRACKING_TYPE ||
-                       (b.stake == null && (b.odds == null || b.odds === 0 || b.odds === 1))
+    const isTracking = b.bet_type === TRACKING_TYPE
+    const dup = findDuplicateFor(b, dupIdx)
+    if (dup) dupCount++
+    b._dup = dup || null
     const srcLabel = b.source_image ? `📷 #${b.source_image} · ` : ''
-    const trackingChip = isTracking
-      ? `<span class="extract-badge" style="background:var(--blue-lt); color:var(--blue-dk);">📊 Tracking</span>`
-      : ''
-    const badge = isPar
-      ? `<span class="extract-badge parlay">🎯 Parlay · ${b.legs.length} legs</span>${trackingChip}`
-      : `<span class="extract-badge single">Single</span>${trackingChip}`
+    const needsInfo = b._parse_path === 'needs_info'
+    const incomplete = !cardIsComplete(b)
+    const pathChip = needsInfo
+      ? `<span class="extract-badge" style="background:#fee2e2;color:#991b1b;" title="${escapeHtml((b._errors || []).join('; '))}">⚠ Needs info</span>`
+      : b._parse_path === 'ai'
+      ? `<span class="extract-badge" style="background:#ede9fe;color:#5b21b6;" title="Parsed by the AI fallback${b._from_cache ? ' (from cache)' : ''}">🤖 AI${b._from_cache ? ' · cached' : ''}</span>`
+      : `<span class="extract-badge" style="background:#fef9c3;color:#854d0e;" title="Parsed locally — no API call">⚡ Local</span>`
+    const warnChip = b._warnings && b._warnings.length
+      ? `<span class="extract-badge" style="background:#fef3c7;color:#92400e;" title="${escapeHtml(b._warnings.join('; '))}">⚠ borrowed ${b._warnings.map(w => w.split(' ')[0]).join('+')}</span>` : ''
+    const trackingChip = isTracking ? `<span class="extract-badge" style="background:var(--blue-lt); color:var(--blue-dk);">📊 Tracking</span>` : ''
+    const dupChip = dup === 'staged' ? `<span class="extract-badge" style="background:#fee2e2;color:#991b1b;" title="Same tipster + date + match + pick is already in Staged">⚠ Already staged</span>`
+                  : dup === 'saved' ? `<span class="extract-badge" style="background:#fee2e2;color:#991b1b;" title="Same tipster + date + match + pick is already saved in your bets">⚠ Already saved</span>` : ''
+    const badge = (isPar
+      ? `<span class="extract-badge parlay">🎯 Parlay · ${b.legs.length} legs</span>`
+      : `<span class="extract-badge single">Single</span>`) + trackingChip + resultChip(b.result) + pathChip + warnChip + dupChip
     const legsHtml = isPar
       ? `<div style="margin-top:8px;">
            ${b.legs.map((l, j) => {
@@ -5758,28 +6695,40 @@ function renderExtractedBets(bets, comments) {
            }).join('')}
          </div>`
       : ''
-
+    const cid = escapeHtml(b._cid)
     return `
-    <div class="extract-card">
+    <div class="extract-card" id="extract-card-${cid}" style="${dup ? 'border-color:#fca5a5;' : ''}">
       <div class="extract-card-head">
         <div style="font-family:var(--font-display); font-weight:700; font-size:13.5px;">
           ${srcLabel}${escapeHtml(b.match || 'Unknown match')}
         </div>
-        ${badge}
+        <div style="display:flex; gap:4px; flex-wrap:wrap; justify-content:flex-end;">${badge}</div>
       </div>
       ${!isPar ? `<div class="extract-field"><span class="extract-field-label">Pick</span><span class="extract-field-value">${escapeHtml(b.pick || '—')}</span></div>` : ''}
+      <div class="extract-field"><span class="extract-field-label">Date</span><span class="extract-field-value">${b.date ? escapeHtml(b.date) : `<span style="color:var(--gray-400)">— (will use today, ${todayLocalISO()})</span>`}</span></div>
       <div class="extract-field"><span class="extract-field-label">Odds</span><span class="extract-field-value">${b.odds != null ? Number(b.odds).toFixed(2) : '—'}</span></div>
-      <div class="extract-field"><span class="extract-field-label">Stake</span><span class="extract-field-value">${b.stake != null ? COP(b.stake) : '—'}</span></div>
+      <div class="extract-field"><span class="extract-field-label">Stake</span><span class="extract-field-value">${isTracking ? '<span style="color:var(--gray-400)">tracking-only</span>' : fmtStakeForCard(b)}</span></div>
       <div class="extract-field"><span class="extract-field-label">Competition</span><span class="extract-field-value">${escapeHtml(b.competition || '—')}${b.competition_type ? ` <span style="color:var(--gray-400)">· ${escapeHtml(b.competition_type)}</span>` : ''}</span></div>
       <div class="extract-field"><span class="extract-field-label">Region</span><span class="extract-field-value">${escapeHtml(b.region || '—')}${b.matchday ? ` <span style="color:var(--gray-400)">· ${escapeHtml(b.matchday)}</span>` : ''}</span></div>
       <div class="extract-field"><span class="extract-field-label">Market</span><span class="extract-field-value">${escapeHtml(b.bet_type || '—')}</span></div>
-      ${b.tipster ? `<div class="extract-field"><span class="extract-field-label">Tipster</span><span class="extract-field-value" style="color:var(--blue); font-weight:600;">${escapeHtml(b.tipster)}</span></div>` : ''}
+      <div class="extract-field"><span class="extract-field-label">Tipster</span><span class="extract-field-value" style="${b.tipster ? 'color:var(--blue); font-weight:600;' : 'color:var(--red);'}">${escapeHtml(b.tipster || 'missing')}</span></div>
       ${b.notes ? `<div class="extract-field"><span class="extract-field-label">Notes</span><span class="extract-field-value">${escapeHtml(b.notes)}</span></div>` : ''}
       ${legsHtml}
+      ${needsInfo ? `
+      <div style="margin-top:10px; padding:10px; border:1px dashed #fca5a5; border-radius:8px; background:var(--red-lt);">
+        <div style="font-size:11px; color:#991b1b; font-weight:600; margin-bottom:6px;">
+          This block couldn't be fully parsed: ${escapeHtml((b._errors || []).join('; ') || 'incomplete')}. Fix the text below (add the missing <code>Tipster:</code> / <code>Date:</code> / <code>- pick</code> lines) and re-parse, or send just this block to the AI.
+        </div>
+        <textarea id="needs-info-raw-${cid}" class="form-textarea" style="min-height:120px; font-family:var(--font-mono); font-size:11.5px;">${escapeHtml(b._raw || '')}</textarea>
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+          <button class="btn btn-secondary btn-sm" onclick="reparseNeedsInfo('${cid}')">↻ Re-parse this block (free)</button>
+          <button class="btn btn-secondary btn-sm" data-parse-btn="needs-${cid}" onclick="aiParseNeedsInfo('${cid}')">🤖 Resolve with AI + web search (paid)</button>
+        </div>
+      </div>` : ''}
       <div class="extract-actions">
-        <button class="btn btn-primary   btn-sm" onclick="sendExtractedToStaged(${i})">📋 Send to Staged</button>
-        <button class="btn btn-secondary btn-sm" onclick="useExtractedBet(${i})">→ Open in Add Bet form</button>
-        <button class="btn btn-secondary btn-sm" onclick="dismissExtractedBet(${i})">Dismiss</button>
+        <button class="btn btn-primary   btn-sm" data-stage-btn onclick="sendExtractedToStaged('${cid}')" ${incomplete ? 'disabled title="Complete tipster, date and picks first"' : ''}>📋 Send to Staged${dup ? ' anyway' : ''}</button>
+        <button class="btn btn-secondary btn-sm" onclick="useExtractedBet('${cid}')">→ Open in Add Bet form</button>
+        <button class="btn btn-secondary btn-sm" onclick="dismissExtractedBet('${cid}')">Dismiss</button>
       </div>
     </div>`
   }).join('')
@@ -5787,33 +6736,53 @@ function renderExtractedBets(bets, comments) {
   const stagedMsg = stagedBets.length
     ? `<span style="color:var(--blue); font-weight:600;">📋 ${stagedBets.length} bet${stagedBets.length !== 1 ? 's' : ''} in Staged</span> — fill in final odds/stakes there before confirming.`
     : `Send bets to <strong>Staged</strong> to add real odds/stake after placing at your bookmaker, then confirm to save.`
+  const incompleteN = bets.filter(b => !cardIsComplete(b)).length
+  const sendable = bets.filter(b => cardIsComplete(b) && (extractedBatchDuplicatesOk || !b._dup)).length
+  const localN = bets.filter(b => b._parse_path === 'local').length
+  const aiN = bets.filter(b => b._parse_path === 'ai').length
 
   resultsDiv.innerHTML = `
+    ${bannerHtml}
     <div class="section-title">✨ Extracted (${bets.length} bet${bets.length !== 1 ? 's' : ''}${
-      screenshotFiles.length
-        ? ` from ${screenshotFiles.length} screenshot${screenshotFiles.length !== 1 ? 's' : ''}`
+      bets.some(b => b._extract_source === 'image')
+        ? ` from ${screenshotFiles.length || 'the'} screenshot${screenshotFiles.length !== 1 ? 's' : ''}`
         : ' from pasted text'
-    })</div>
+    } · ⚡ ${localN} local · 🤖 ${aiN} AI${incompleteN ? ` · ⚠ ${incompleteN} needs info` : ''})</div>
     <div style="font-size:11px; color:var(--gray-400); margin-bottom:6px; font-family:var(--font-mono);">
       Instructions used: ${comments ? escapeHtml(comments) : '(none)'}
     </div>
     <div style="font-size:12px; color:var(--gray-600); margin-bottom:12px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
       <span>${stagedMsg}</span>
-      ${bets.length > 1 ? `<button class="btn btn-primary btn-sm" onclick="sendAllExtractedToStaged()">📋 Send all ${bets.length} to Staged</button>` : ''}
+      ${bets.length > 1 ? `<button class="btn btn-primary btn-sm" id="send-all-extracted-btn" data-stage-btn onclick="sendAllExtractedToStaged()" ${sendable ? '' : 'disabled'}>📋 Send all ${sendable} to Staged</button>` : ''}
+      ${dupCount ? `<label class="form-check" style="margin:0; font-size:11.5px;"><input type="checkbox" ${extractedBatchDuplicatesOk ? 'checked' : ''} onchange="toggleIncludeDuplicates(this.checked)" /> <span>include ${dupCount} duplicate${dupCount !== 1 ? 's' : ''}</span></label>` : ''}
       ${stagedBets.length ? `<button class="btn btn-secondary btn-sm" onclick="showPage('staged')">Go to Staged →</button>` : ''}
+      <button class="btn btn-secondary btn-sm" onclick="clearExtractedBets()" title="Drop all cards">🗑 Clear cards</button>
     </div>
     ${cards}`
 }
 
-window.useExtractedBet = function(i) {
-  const b = extractedBets[i]
+window.toggleIncludeDuplicates = function(on) {
+  extractedBatchDuplicatesOk = !!on
+  renderExtractedBets(extractedBets, currentComments())
+}
+window.clearExtractedBets = function() {
+  extractedBets = []
+  persistExtractedBets()
+  const r = document.getElementById('extract-results'); if (r) r.innerHTML = ''
+}
+function currentComments() { return (document.getElementById('f-ocr-comments')?.value || '').trim() }
+function findExtracted(cid) { return extractedBets.find(b => b._cid === cid) || null }
+
+window.useExtractedBet = function(cid) {
+  const b = findExtracted(cid)
   if (!b) return
-  editingExtractedIndex = i
+  editingExtractedIndex = extractedBets.indexOf(b)
   openAddModal({
     match:            b.match,
     pick:             b.pick,
     odds:             b.odds,
-    stake:            b.stake,
+    stake:            b.stake_cop != null ? b.stake_cop : null,
+    units:            b.units,
     competition:      b.competition,
     competition_type: b.competition_type,
     region:           b.region,
@@ -5822,65 +6791,153 @@ window.useExtractedBet = function(i) {
     notes:            b.notes,
     tipster:          b.tipster,
     bet_type:         b.bet_type,
+    date:             b.date,
   })
 }
 
-window.dismissExtractedBet = function(i) {
-  extractedBets.splice(i, 1)
-  renderExtractedBets(extractedBets, (document.getElementById('f-ocr-comments').value || '').trim())
+window.dismissExtractedBet = function(cid) {
+  extractedBets = extractedBets.filter(b => b._cid !== cid)
+  persistExtractedBets()
+  renderExtractedBets(extractedBets, currentComments())
+}
+
+function setStageButtonsBusy(busy, label) {
+  stagingInFlight = !!busy
+  document.querySelectorAll('[data-stage-btn]').forEach(btn => {
+    if (busy) { btn.dataset.origLabel = btn.dataset.origLabel || btn.textContent; btn.disabled = true; if (label && btn.id === 'send-all-extracted-btn') btn.textContent = label }
+    else { btn.disabled = false; if (btn.dataset.origLabel) btn.textContent = btn.dataset.origLabel }
+  })
+}
+
+// ── "Needs info" card helpers ──────────────────────────────────────
+function batchDefaultsFromCards(exceptCid) {
+  const others = extractedBets.filter(b => b._cid !== exceptCid && b._parse_path !== 'needs_info')
+  const tips = [...new Set(others.map(b => b.tipster).filter(Boolean))]
+  const dates = [...new Set(others.map(b => b.date).filter(Boolean))]
+  const batchTipsters = tipsterBatch.rows.map(r => r.tipster).filter(Boolean)
+  return {
+    defaultTipster: batchTipsters.length === 1 ? batchTipsters[0] : (tips.length === 1 ? tips[0] : undefined),
+    defaultDate: dates.length === 1 ? dates[0] : undefined,
+  }
+}
+function replaceCard(cid, newBet) {
+  const i = extractedBets.findIndex(b => b._cid === cid)
+  if (i < 0) extractedBets.push(newBet); else extractedBets[i] = newBet
+  persistExtractedBets()
+  renderExtractedBets(extractedBets, currentComments())
+}
+// Free: re-run the local parser on the (possibly edited) raw block.
+window.reparseNeedsInfo = function(cid) {
+  const ta = document.getElementById(`needs-info-raw-${cid}`)
+  const raw = (ta ? ta.value : '').trim()
+  if (!raw) { toast('The block is empty', 'error'); return }
+  const trackingOnly = !!document.getElementById('f-paste-tracking')?.checked
+  const r = parseStructuredBlock(raw, { trackingOnly, ...batchDefaultsFromCards(cid) })
+  if (r.ok) { replaceCard(cid, { ...r.bet, _cid: cid }); toast('Block parsed ⚡', 'success') }
+  else {
+    replaceCard(cid, makeNeedsInfoCard({ text: raw, errors: r.errors, bet: { ...r.bet, _cid: cid } }))
+    toast('Still missing: ' + r.errors.join('; '), 'error')
+  }
+}
+// Paid: send ONLY this block to the AI (with the current paste as context and
+// web search allowed) and swap the card for whatever it returns.
+window.aiParseNeedsInfo = async function(cid) {
+  if (parseInFlight) return
+  const ta = document.getElementById(`needs-info-raw-${cid}`)
+  const raw = (ta ? ta.value : '').trim()
+  if (!raw) { toast('The block is empty', 'error'); return }
+  const apiKey = (document.getElementById('f-api-key')?.value || '').trim()
+  if (!apiKey) { toast('Enter your Anthropic API key first', 'error'); return }
+  saveApiKey(apiKey)
+  const trackingOnly = !!document.getElementById('f-paste-tracking')?.checked
+  const comments = currentComments()
+  const context = (document.getElementById('f-paste-text')?.value || '').trim()
+  const model = getImportModel('text')
+  const btn = document.querySelector(`[data-parse-btn="needs-${cid}"]`)
+  setParseButtonsBusy(true); if (btn) btn.textContent = '⏳ Asking the AI…'
+  try {
+    const userContent = [{ type: 'text', text: `${buildUserInstructionsBlock(comments, trackingOnly)}\n\n--- FULL BATCH (context only — do NOT record these) ---\n${context || '(none)'}\n\n--- BLOCK TO EXTRACT (record EXACTLY 1 bet) ---\n${raw}\n\nRecover missing fields from the block, from the batch context, or with web_search. Never return zero bets.` }]
+    const { bets } = await callClaudeExtract({ apiKey, model, userContent, maxTokens: estimateMaxTokens(2), allowSearch: true })
+    if (!bets.length) throw new Error('The AI returned no bet for this block.')
+    const nb = normalizeAiBet(bets[0], { trackingOnly, source: 'text' })
+    nb._cid = cid
+    replaceCard(cid, nb)
+    toast('Block resolved by the AI 🤖', 'success')
+  } catch (err) {
+    toast('AI could not resolve it: ' + err.message, 'error')
+  } finally {
+    setParseButtonsBusy(false)
+  }
 }
 
 // Persist a single extracted bet to the staged-bets table, then drop it from
 // the in-memory preview so it doesn't get sent twice.
-window.sendExtractedToStaged = async function(i) {
-  const b = extractedBets[i]
+window.sendExtractedToStaged = async function(cid) {
+  if (stagingInFlight) return
+  const b = findExtracted(cid)
   if (!b) return
+  if (!cardIsComplete(b)) { toast('Complete tipster, date and picks first (⚠ Needs info)', 'error'); return }
   const source = b._extract_source === 'image' ? 'image' : 'text'
+  setStageButtonsBusy(true)
   try {
     const payload = extractedToStagedPayload(b, source)
     const inserted = await insertStagedBet(payload)
     if (inserted) stagedBets.unshift(inserted)
+    extractedBets = extractedBets.filter(x => x._cid !== cid)
+    persistExtractedBets()
     refreshStagedBadge()
-    extractedBets.splice(i, 1)
-    renderExtractedBets(extractedBets, (document.getElementById('f-ocr-comments').value || '').trim())
+    renderExtractedBets(extractedBets, currentComments())
     toast('Sent to Staged', 'success')
   } catch (err) {
     toast('Could not save to staged: ' + err.message, 'error')
+  } finally {
+    setStageButtonsBusy(false)
   }
 }
 
-// Bulk-send every currently-extracted bet. Continues past individual failures
-// and reports a summary at the end.
+// Bulk-send every currently-extracted bet in ONE insert. Falls back to
+// per-row inserts (tracking success by card identity) only if the bulk call
+// fails. Duplicates are skipped unless "include duplicates" is ticked.
 window.sendAllExtractedToStaged = async function() {
-  if (!extractedBets.length) return
-  const total = extractedBets.length
-  let ok = 0, failed = 0
-  // Iterate over a snapshot, then clear; we re-render once at the end.
-  const snapshot = [...extractedBets]
-  for (const b of snapshot) {
-    const source = b._extract_source === 'image' ? 'image' : 'text'
-    try {
-      const inserted = await insertStagedBet(extractedToStagedPayload(b, source))
-      if (inserted) stagedBets.unshift(inserted)
-      ok++
-    } catch (err) {
-      console.warn('staged insert failed:', err.message)
-      failed++
+  if (stagingInFlight || !extractedBets.length) return
+  const dupIdx = buildDedupeIndex()
+  const targets = extractedBets.filter(b => cardIsComplete(b) && (extractedBatchDuplicatesOk || !findDuplicateFor(b, dupIdx)))
+  const incompleteN = extractedBets.filter(b => !cardIsComplete(b)).length
+  const skipped = extractedBets.length - targets.length - incompleteN
+  if (!targets.length) { toast(incompleteN ? 'Complete the "⚠ Needs info" cards first' : 'Every card is a duplicate — tick "include duplicates" to send them anyway', 'error'); return }
+  const total = targets.length
+  setStageButtonsBusy(true, `⏳ Staging 0/${total}…`)
+  const progress = n => { const el = document.getElementById('send-all-extracted-btn'); if (el) el.textContent = `⏳ Staging ${n}/${total}…` }
+
+  const payloads = targets.map(b => extractedToStagedPayload(b, b._extract_source === 'image' ? 'image' : 'text'))
+  const okCids = new Set()
+  let failed = 0, lastErr = ''
+  try {
+    const { data, error } = await supabase.from('nfl_staged_bets').insert(payloads).select()
+    if (error) throw new Error(error.message)
+    ;(data || []).forEach(row => stagedBets.unshift(row))
+    targets.forEach(b => okCids.add(b._cid))
+    progress(total)
+  } catch (bulkErr) {
+    console.warn('bulk staged insert failed, falling back to per-row:', bulkErr.message)
+    for (let i = 0; i < targets.length; i++) {
+      try {
+        const inserted = await insertStagedBet(payloads[i])
+        if (inserted) stagedBets.unshift(inserted)
+        okCids.add(targets[i]._cid)
+      } catch (err) { failed++; lastErr = err.message }
+      progress(i + 1)
+      refreshStagedBadge()
     }
   }
-  // Drop the ones that succeeded; keep failed ones around for retry.
-  if (failed === 0) {
-    extractedBets = []
-  } else {
-    // We can't perfectly diff which failed without IDs; safest is to keep all
-    // that the API didn't reflect — but our loop succeeded for `ok` items in
-    // order, so drop the first `ok` from the head of the array.
-    extractedBets = extractedBets.slice(ok)
-  }
+  extractedBets = extractedBets.filter(b => !okCids.has(b._cid))   // keep failed + skipped cards by identity
+  persistExtractedBets()
   refreshStagedBadge()
-  renderExtractedBets(extractedBets, (document.getElementById('f-ocr-comments').value || '').trim())
-  if (failed === 0) toast(`Sent ${ok} bet${ok !== 1 ? 's' : ''} to Staged`, 'success')
-  else              toast(`Sent ${ok}/${total} — ${failed} failed`, 'error')
+  setStageButtonsBusy(false)
+  renderExtractedBets(extractedBets, currentComments())
+  const skippedMsg = (skipped ? ` · ${skipped} duplicate${skipped !== 1 ? 's' : ''} skipped` : '') + (incompleteN ? ` · ${incompleteN} "needs info" card${incompleteN !== 1 ? 's' : ''} kept` : '')
+  if (failed === 0) toast(`Sent ${okCids.size} bet${okCids.size !== 1 ? 's' : ''} to Staged${skippedMsg}`, 'success')
+  else              toast(`Sent ${okCids.size}/${total} — ${failed} failed (${lastErr})${skippedMsg}`, 'error')
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -6177,7 +7234,7 @@ function renderStagedCard(b) {
         <input type="number" step="0.25" min="0" list="staged-unit-options"
                value="${b.units != null ? b.units : ''}" placeholder="e.g. 1"
                oninput="updateStagedUnits(${b.id}, this.value)" />
-        <span class="hint">1 unit = ${COP(UNIT_COP)}</span>
+        <span class="hint">${b.units != null ? `${Number(b.units)}U · ` : ''}1 unit = ${COP(UNIT_COP)}</span>
       </div>`
 
   const stakeField = isTracking ? `
@@ -6188,9 +7245,19 @@ function renderStagedCard(b) {
       </div>` : `
       <div class="staged-edit-field stat-stake">
         <label>Stake (COP)</label>
-        <input type="number" step="1" value="${b.stake_cop != null ? b.stake_cop : ''}" placeholder="e.g. 5000"
+        <input type="number" step="any" min="0" value="${b.stake_cop != null ? b.stake_cop : ''}" placeholder="e.g. 5000"
                oninput="updateStagedField(${b.id}, 'stake_cop', this.value)" />
         ${hint('stake_cop', b.stake_cop, v => COP(v)) || legacyStakeHint}
+        ${b.stake_amount != null && b.stake_currency && b.stake_currency !== 'COP'
+          ? `<span class="hint ${b.stake_cop == null ? 'hint-edited' : ''}">imported ${escapeHtml(String(Number(b.stake_amount).toLocaleString('es-CO')))} ${escapeHtml(b.stake_currency)}${b.stake_cop == null ? ' — set an FX rate in Import settings or type the COP amount' : ''}</span>`
+          : ''}
+      </div>`
+  const resultOpts = [['', '— pending —'], ['won', '✅ Won'], ['lost', '❌ Lost'], ['void', '⬜ Void']]
+    .map(([v, l]) => `<option value="${v}" ${(b.result || '') === v ? 'selected' : ''}>${l}</option>`).join('')
+  const resultField = `
+      <div class="staged-edit-field">
+        <label>Result <span class="hint" style="text-transform:none;letter-spacing:0;">(from import)</span></label>
+        <select onchange="updateStagedField(${b.id}, 'result', this.value)">${resultOpts}</select>
       </div>`
 
   return `
@@ -6204,7 +7271,7 @@ function renderStagedCard(b) {
           </div>
         </div>
         <div class="staged-card-actions">
-          ${typeBadge}${trackingChip}
+          ${typeBadge}${trackingChip}${resultChip(b.result)}
           <button class="btn btn-reset btn-sm"
                   title="${isTracking ? 'Restore odds & stake fields for this bet' : 'Make this a follow-up only — clears odds, stake & units'}"
                   onclick="toggleStagedTracking(${b.id})"
@@ -6281,10 +7348,11 @@ function renderStagedCard(b) {
           <select id="staged-book2-${b.id}" onchange="setStagedBookmakers(${b.id})">${bookmaker2Opts}</select>
         </div>
         <div class="staged-edit-field">
-          <label>Date placed</label>
+          <label>Date placed <span class="hint" style="text-transform:none;letter-spacing:0;">(bet keeps "Date" above)</span></label>
           <input type="date" value="${datePlaced}"
                  oninput="updateStagedField(${b.id}, 'date_placed', this.value)" />
         </div>
+        ${resultField}
         <div class="staged-edit-field" style="grid-column: 1 / -1;">
           <label>Notes</label>
           <input type="text" value="${escapeHtml(b.notes || '')}" placeholder="Reasoning, key stats, lineup news..."
@@ -6807,8 +7875,17 @@ function stagedToBetPayload(b) {
   const betType = isTracking ? TRACKING_TYPE : (isPar ? 'Parlay' : (b.bet_type || 'Moneyline'))
   const notesParts = [b.notes || '', b.bookmaker ? `Bookmaker: ${b.bookmaker}` : '']
     .filter(Boolean)
+  // Result carried from the import ("Resultado: Ganada"). football_bets uses
+  // 1 = won, 0 = lost, null = pending/void (void has no distinct code there,
+  // so "void" stays null and the note "Resultado: Nula" documents it).
+  const resultCode = b.result === 'won' ? 1 : b.result === 'lost' ? 0 : null
+  const legCount = isPar ? parseParlayLegs(b.pick).length : 0
+  let legResults = isPar && Array.isArray(b.leg_results) && b.leg_results.length === legCount ? b.leg_results : null
+  if (isPar && !legResults && resultCode === 1) legResults = Array(legCount).fill(1)   // a won parlay = every leg won
   return {
-    date:             b.date_placed || b.date || todayLocalISO(),
+    // The bet's own date (from the paste or the card), NOT the day it was
+    // staged — a Friday bet staged on Saturday must stay on Friday.
+    date:             b.date || b.date_placed || todayLocalISO(),
     competition:      b.competition || '',
     region:           b.region || '',
     matchday:         b.matchday || '',
@@ -6821,6 +7898,8 @@ function stagedToBetPayload(b) {
     stake_cop:        finalStake,
     notes:            notesParts.join(' · '),
     competition_type: b.competition_type || '',
+    result:           resultCode,
+    leg_results:      legResults,
   }
 }
 

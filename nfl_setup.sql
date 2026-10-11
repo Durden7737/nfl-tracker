@@ -1,7 +1,9 @@
 -- ═══════════════════════════════════════════════════════════════════
--- NFL BETS — SUPABASE SCHEMA  (run in the TENNIS-BETTING project)
+-- NFL BETS — SUPABASE SCHEMA  (run in the FOOTBALL-BETTING project)
 -- ═══════════════════════════════════════════════════════════════════
--- Paste this entire file into the tennis-betting project's SQL Editor
+-- Paste this entire file into the football-betting project's SQL Editor
+-- (dtmnpveiyvjotpotibdv). Moved off tennis-betting on 2026-09-13 after that
+-- project's database wedged and took the NFL tracker down with it.
 -- and click Run. It:
 --   1) creates the new nfl_bets table + nfl_bets_with_calc view
 --      (auto-computes potential payout + P/L),
@@ -189,3 +191,14 @@ create policy "nfl_staged_anon_all"
 
 grant all on public.nfl_staged_bets to anon, authenticated;
 grant usage, select on sequence nfl_staged_bets_id_seq to anon, authenticated;
+
+-- ── 2026-10-11 · Import → Paste Text local parser (port of the Football change set) ──
+-- Staged rows now carry the parsed result, per-leg results, money stakes in their
+-- original currency and a dedupe key (plain index, NOT unique — "include duplicates" must work).
+alter table public.nfl_staged_bets
+  add column if not exists result text,
+  add column if not exists leg_results jsonb,
+  add column if not exists stake_amount numeric,
+  add column if not exists stake_currency text,
+  add column if not exists dedupe_key text;
+create index if not exists nfl_staged_bets_dedupe_key_idx on public.nfl_staged_bets (dedupe_key);
