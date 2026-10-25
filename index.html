@@ -1866,6 +1866,127 @@
   /* tipster pill inside the feed strip */
   .feed-pick-label .tipster-pill { font-size: 9px; padding: 1px 7px; margin-left: 3px;
     vertical-align: middle; letter-spacing: 0.2px; text-transform: none; }
+
+  /* ═══════════════════════════════════════════════════════════════════
+     MOBILE v2 (2026-10-25) — iPhone comfort layer.
+     Phone-only (≤700px). Same data, same Supabase sync — layout only.
+     ═══════════════════════════════════════════════════════════════════ */
+  .m-fab, .m-sheet-overlay, .m-sync-pill { display: none; }
+  @media (max-width: 700px) {
+    html { font-size: 15px; -webkit-text-size-adjust: 100%; }
+    body { -webkit-tap-highlight-color: transparent; }
+
+    /* ── Top bar: brand only, compact ───────────────────────────── */
+    nav:not(.bottom-tab-bar) {
+      height: calc(46px + env(safe-area-inset-top));
+      padding: env(safe-area-inset-top) 14px 0;
+    }
+    .nav-add, .nav-links { display: none !important; }
+
+    /* ── Bottom tab bar ─────────────────────────────────────────────
+       The generic `nav { top:0; height:48px; display:flex … }` rules of
+       the glass theme also hit this <nav>, which pinned the "bottom" bar
+       to the TOP of the screen on phones. Reset everything here. */
+    nav.bottom-tab-bar {
+      display: block !important; position: fixed; top: auto; bottom: 0; left: 0; right: 0;
+      height: auto; padding: 0 0 env(safe-area-inset-bottom); margin: 0;
+      background: rgba(12,13,14,0.88);
+      backdrop-filter: blur(24px) saturate(1.6); -webkit-backdrop-filter: blur(24px) saturate(1.6);
+      border-top: 1px solid rgba(255,255,255,0.08); border-bottom: none;
+      box-shadow: 0 -10px 30px rgba(0,0,0,0.45); z-index: 150;
+    }
+    nav.bottom-tab-bar::before, nav.bottom-tab-bar::after { content: none; }
+    .bottom-tab-bar-inner { display: flex; align-items: stretch; height: 58px; }
+    .tab-btn { flex: 1 1 0; min-width: 0; gap: 4px; padding: 7px 2px 5px; font-size: 10px; font-weight: 600; }
+    .tab-btn .tab-icon { font-size: 21px; }
+    .tab-btn .tab-label { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+    .tab-btn .nav-badge-sm { font-size: 8.5px; min-width: 14px; padding: 0 4px; vertical-align: 1px; }
+    .tab-btn:active { transform: scale(0.94); }
+
+    /* ── Page body: room for the tab bar + FAB ──────────────────── */
+    .page { padding: 12px 12px calc(108px + env(safe-area-inset-bottom)); }
+
+    /* ── Floating "+ Add Bet" button ────────────────────────────── */
+    .m-fab {
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      position: fixed; right: 16px; bottom: calc(74px + env(safe-area-inset-bottom)); z-index: 140;
+      height: 52px; padding: 0 20px 0 16px; border-radius: 999px; border: none; cursor: pointer;
+      background: var(--blue); color: var(--white);
+      font-family: var(--font-display); font-weight: 800; font-size: 14px; letter-spacing: 0.3px;
+      box-shadow: 0 10px 26px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.12) inset;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .m-fab:active { transform: scale(0.95); }
+    .m-fab-plus { font-size: 24px; line-height: 1; font-weight: 500; margin-top: -2px; }
+
+    /* ── "More" action sheet (Tipsters / Import / Export / Sync) ── */
+    .m-sheet-overlay {
+      display: flex; position: fixed; inset: 0; z-index: 210; align-items: flex-end;
+      background: rgba(0,0,0,0.45); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+    }
+    .m-sheet-overlay[hidden] { display: none; }
+    .m-sheet {
+      width: 100%; background: #16191C; border-radius: 20px 20px 0 0;
+      padding: 8px 14px calc(14px + env(safe-area-inset-bottom));
+      border-top: 1px solid rgba(255,255,255,0.10); animation: slideUp 0.22s ease;
+    }
+    .m-sheet-handle { width: 38px; height: 4px; border-radius: 2px; margin: 4px auto 12px; background: rgba(255,255,255,0.22); }
+    .m-sheet-item {
+      display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 0 14px;
+      margin-bottom: 6px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.05); color: var(--gray-900); cursor: pointer; text-align: left;
+      font-family: var(--font-body); font-size: 15px; font-weight: 600;
+    }
+    .m-sheet-item:active { background: rgba(255,255,255,0.12); }
+    .m-sheet-item .m-ico { font-size: 20px; width: 28px; text-align: center; }
+    .m-sheet-item .m-sub { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--gray-400); font-weight: 500; }
+    .m-sheet-cancel { background: transparent; border-color: transparent; justify-content: center; color: var(--gray-400); margin-top: 4px; }
+    .m-sync-pill {
+      display: block; text-align: center; font-family: var(--font-mono); font-size: 10px;
+      color: var(--gray-400); letter-spacing: 0.6px; padding: 2px 0 8px;
+    }
+
+    /* ── Modals become bottom sheets ────────────────────────────── */
+    .modal-overlay { align-items: flex-end; padding: 0; }
+    .modal {
+      max-width: none !important; width: 100%;
+      max-height: calc(100vh - 20px - env(safe-area-inset-top));
+      max-height: calc(100dvh - 20px - env(safe-area-inset-top));
+      border-radius: 22px 22px 0 0; display: flex; flex-direction: column; overflow: hidden;
+      animation: slideUp 0.24s ease;
+    }
+    .modal-header { flex: 0 0 auto; padding: 18px 16px 12px; position: relative; }
+    .modal-header::before {
+      content: ''; position: absolute; top: 7px; left: 50%; width: 38px; height: 4px; margin-left: -19px;
+      border-radius: 2px; background: rgba(255,255,255,0.22);
+    }
+    .modal-title { font-size: 17px; }
+    .modal-close { width: 36px; height: 36px; border-radius: 10px; font-size: 16px; }
+    .modal-body { flex: 1 1 auto; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 14px 16px 20px; }
+    .modal-footer { flex: 0 0 auto; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); gap: 10px; }
+    .modal-footer .btn { flex: 1 1 0; min-height: 48px; font-size: 14px; font-weight: 700; border-radius: 14px; }
+    .form-input, .form-select, .form-textarea { min-height: 46px; font-size: 16px; border-radius: 12px; }
+    .form-textarea { min-height: 84px; }
+
+    /* ── Dashboard breakdown tables: fit the phone width ────────── */
+    .breakdown-card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .breakdown-table { width: calc(100% - 8px); margin: 4px 4px 6px; font-size: 10.5px; }
+    .breakdown-table th { padding: 7px 5px; font-size: 7px; letter-spacing: 0.6px; }
+    .breakdown-table td { padding: 8px 5px; font-size: 10px; }
+    .breakdown-table .name-cell { gap: 5px; }
+    .kpi-grid { gap: 10px; margin-bottom: 16px; }
+    .kpi-card { padding: 11px 12px; }
+
+    /* ── Picks feed: a little more breathing room, bigger targets ── */
+    .feed-card { border-radius: 18px; }
+    .feed-foot-actions .btn-edit, .feed-foot-actions .btn-delete { width: 44px; height: 44px; }
+    .btn { min-height: 40px; }
+    select.form-select, .form-select { background-size: 14px; }
+  }
+  /* Standalone PWA (added to Home Screen): no rubber-band behind the fixed bars */
+  @media (max-width: 700px) and (display-mode: standalone) {
+    html, body { overscroll-behavior-y: none; }
+  }
 </style>
 </head>
 <body>
@@ -1897,10 +2018,10 @@
 <nav class="bottom-tab-bar" id="bottom-tab-bar">
   <div class="bottom-tab-bar-inner">
     <button class="tab-btn active" id="tab-dashboard" onclick="showPage('dashboard')">
-      <span class="tab-icon">📊</span><span class="tab-label">Dashboard</span>
+      <span class="tab-icon">📊</span><span class="tab-label">Home</span>
     </button>
     <button class="tab-btn" id="tab-bets" onclick="showPage('bets')">
-      <span class="tab-icon">🏈</span><span class="tab-label">All Bets</span>
+      <span class="tab-icon">🏈</span><span class="tab-label">Bets</span>
     </button>
     <button class="tab-btn" id="tab-pending" onclick="showPage('pending')">
       <span class="tab-icon">⏳</span><span class="tab-label">Pending <span id="tab-pending-count" class="nav-badge nav-badge-sm" style="display:none">0</span></span>
@@ -1908,17 +2029,30 @@
     <button class="tab-btn" id="tab-live" onclick="showPage('live')">
       <span class="tab-icon">🛰</span><span class="tab-label">Live</span>
     </button>
-    <button class="tab-btn" id="tab-tipsters" onclick="showPage('tipsters')">
-      <span class="tab-icon">⭐</span><span class="tab-label">Tipsters</span>
-    </button>
-    <button class="tab-btn" id="tab-import" onclick="showPage('import')">
-      <span class="tab-icon">☄</span><span class="tab-label">Import</span>
-    </button>
     <button class="tab-btn" id="tab-staged" onclick="showPage('staged')">
       <span class="tab-icon">📋</span><span class="tab-label">Staged <span id="tab-staged-count" class="nav-badge nav-badge-sm" style="display:none">0</span></span>
     </button>
+    <button class="tab-btn" id="tab-more" onclick="openMoreSheet()">
+      <span class="tab-icon">⋯</span><span class="tab-label">More</span>
+    </button>
   </div>
 </nav>
+
+<!-- MOBILE: floating Add Bet button -->
+<button class="m-fab" id="m-fab" onclick="openAddModal()" aria-label="Add bet"><span class="m-fab-plus">+</span> Add Bet</button>
+
+<!-- MOBILE: "More" action sheet -->
+<div class="m-sheet-overlay" id="m-more-sheet" hidden onclick="closeMoreSheet(event)">
+  <div class="m-sheet" onclick="event.stopPropagation()">
+    <div class="m-sheet-handle"></div>
+    <button class="m-sheet-item" onclick="closeMoreSheet(); showPage('tipsters')"><span class="m-ico">⭐</span>Tipsters</button>
+    <button class="m-sheet-item" onclick="closeMoreSheet(); showPage('import')"><span class="m-ico">☄</span>Import <span class="m-sub">image · text</span></button>
+    <button class="m-sheet-item" onclick="closeMoreSheet(); exportBackupXLSX()"><span class="m-ico">📥</span>Export backup <span class="m-sub">.xlsx</span></button>
+    <button class="m-sheet-item" onclick="refreshFromCloud(false)"><span class="m-ico">🔄</span>Sync now <span class="m-sub" id="m-sync-sub"></span></button>
+    <span class="m-sync-pill" id="m-sync-status"></span>
+    <button class="m-sheet-item m-sheet-cancel" onclick="closeMoreSheet()">Cancel</button>
+  </div>
+</div>
 
 <!-- ADD BET MODAL -->
 <div class="modal-overlay" id="tipster-history-modal" style="display:none" onclick="closeTipsterHistory(event)">
@@ -8363,6 +8497,86 @@ init().then(() => {
   // still calls mergeOldTipsterMeta explicitly when you choose to import a file.
   maybeOfferOldDataMigration()
 })
+
+// ═══════════════════════════════════════════════════════════════════
+// MOBILE v2 (2026-10-25) — "More" sheet, Sync now, auto re-sync on
+// return to foreground. Pure additions; nothing above changes.
+// ═══════════════════════════════════════════════════════════════════
+let lastSyncAt = Date.now()
+function syncAgoText() {
+  const s = Math.round((Date.now() - lastSyncAt) / 1000)
+  if (s < 10) return 'just now'
+  if (s < 60) return s + 's ago'
+  const m = Math.round(s / 60)
+  if (m < 60) return m + ' min ago'
+  return Math.round(m / 60) + ' h ago'
+}
+function paintSyncStatus() {
+  const el = document.getElementById('m-sync-status')
+  if (el) el.textContent = (SUPABASE_CONFIGURED ? '☁ SYNCED ' : '⚠ LOCAL ONLY · ') + syncAgoText().toUpperCase()
+  const sub = document.getElementById('m-sync-sub')
+  if (sub) sub.textContent = syncAgoText()
+}
+window.openMoreSheet = function() {
+  paintSyncStatus()
+  const el = document.getElementById('m-more-sheet')
+  if (el) el.hidden = false
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+  const t = document.getElementById('tab-more'); if (t) t.classList.add('active')
+}
+window.closeMoreSheet = function(ev) {
+  if (ev && ev.target && ev.target.id !== 'm-more-sheet') return
+  const el = document.getElementById('m-more-sheet')
+  if (el) el.hidden = true
+  // restore the active tab for the page we are on
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
+  const t = document.getElementById('tab-' + currentPage) || (['tipsters','import'].includes(currentPage) ? document.getElementById('tab-more') : null)
+  if (t) t.classList.add('active')
+}
+// Re-read bets + staged bets from Supabase and repaint the current page.
+// Skipped when a modal is open or on pages with in-progress edits (staged /
+// import), so a background refresh never wipes what you are typing.
+let refreshing = false
+window.refreshFromCloud = async function(silent = true) {
+  if (refreshing) return
+  const modalOpen = [...document.querySelectorAll('.modal-overlay')].some(m => m.style.display !== 'none')
+  const editingPage = ['staged', 'import'].includes(currentPage)
+  if (silent && (modalOpen || editingPage)) return
+  refreshing = true
+  try {
+    await loadBets()
+    await loadStagedBets()
+    lastSyncAt = Date.now()
+    refreshStagedBadge()
+    if (!modalOpen && !editingPage) {
+      const y = window.scrollY
+      showPage(currentPage)
+      window.scrollTo(0, y)
+    }
+    paintSyncStatus()
+    if (!silent) { toast('☁ Synced with the cloud'); closeMoreSheet() }
+  } catch (e) {
+    if (!silent) toast('Sync failed: ' + (e && e.message ? e.message : e), 'error')
+  } finally { refreshing = false }
+}
+// iPhone: when the app comes back from the background (or the tab regains
+// focus) after 45 s or more, pull fresh data so Mac ↔ iPhone stay in step.
+let hiddenAt = null
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return }
+  if (hiddenAt && Date.now() - hiddenAt > 45_000) refreshFromCloud(true)
+  hiddenAt = null
+})
+window.addEventListener('pageshow', (e) => { if (e.persisted) refreshFromCloud(true) })
+// Keep the "More" tab lit while on the pages it hosts.
+{
+  const _showPage = window.showPage
+  window.showPage = function(page) {
+    _showPage(page)
+    const more = document.getElementById('tab-more')
+    if (more) more.classList.toggle('active', page === 'tipsters' || page === 'import')
+  }
+}
 </script>
 </body>
 </html>
