@@ -3899,14 +3899,17 @@ function renderBetsTable(bets, showSettle = false, sortable = false) {
     <div class="empty-sub">Try adjusting your filters or add a new bet</div></div>`
 
   // Running record for the tipster line (bet-level, settled bets only)
-  const recordFor = (name) => {
-    if (!name) return null
-    const hist = allBets.filter(x => (x.tipster || '') === name && x.result !== null)
-    if (!hist.length) return null
-    const w = hist.filter(x => x.result === 1).length
-    const pl = hist.reduce((s, x) => s + Number(x.pl_cop || 0), 0)
-    return { w, l: hist.length - w, n: hist.length, pl }
+  // One pass over allBets instead of one scan per card (588 pending cards
+  // × thousands of bets was the main cost of a Pending re-render).
+  const recMap = new Map()
+  for (const x of allBets) {
+    if (x.result === null || !x.tipster) continue
+    let r = recMap.get(x.tipster)
+    if (!r) { r = { w: 0, l: 0, n: 0, pl: 0 }; recMap.set(x.tipster, r) }
+    r.n++; if (x.result === 1) r.w++; else r.l++
+    r.pl += Number(x.pl_cop || 0)
   }
+  const recordFor = (name) => (name && recMap.get(name)) || null
 
   const cards = bets.map(b => {
     const regClass = regionClass(b.region)
@@ -3995,7 +3998,7 @@ function renderBetsTable(bets, showSettle = false, sortable = false) {
         </span>
       </div>`
 
-    return `<div class="feed-card">
+    return `<div class="feed-card" data-bet-id="${b.id}">
       <div class="feed-head">
         <span class="feed-date">${dateLong}${b.matchday ? ' · ' + escapeHtml(b.matchday) : ''}</span>
         <span class="feed-league"><span class="reg-dot ${regClass}"></span>${escapeHtml(b.competition || b.region || '')}</span>
@@ -4646,11 +4649,40 @@ async function refreshBetRow(betId) {
   const i = allBets.findIndex(x => x.id === betId)
   if (i >= 0) allBets[i] = data
 }
+// Re-render ONLY the clicked bet's card (the Pending page can hold hundreds
+// of cards; rebuilding all of them on every ✓/✗ click is what caused the lag).
+// The full page (KPIs, chips, counts) is refreshed once clicks stop.
+let fullRerenderTimer = null
+function scheduleFullRerender(delay = 1200) {
+  clearTimeout(fullRerenderTimer)
+  fullRerenderTimer = setTimeout(() => {
+    fullRerenderTimer = null
+    if (settleWritesInFlight.size && [...settleWritesInFlight.values()].some(n => n > 0)) { scheduleFullRerender(); return }
+    showPage(currentPage)
+  }, delay)
+}
+function rerenderBetCard(betId) {
+  const el = document.querySelector(`.feed-card[data-bet-id="${betId}"]`)
+  if (!el) return false
+  const b = allBets.find(x => x.id === betId); if (!b) return false
+  if (b.result !== null && (currentPage === 'pending' || currentPage === 'live')) {
+    el.remove()                               // settled → leaves the pending list
+    refreshNavBadges()
+    return true
+  }
+  const tmp = document.createElement('div')
+  tmp.innerHTML = renderBetsTable([b], true)
+  const fresh = tmp.querySelector('.feed-card')
+  if (!fresh) return false
+  el.replaceWith(fresh)
+  return true
+}
 async function optimisticBetUpdate(betId, patch, successLabel) {
   const i = allBets.findIndex(x => x.id === betId); if (i < 0) return
   allBets[i] = Object.assign({}, allBets[i], patch)
   settleWritesInFlight.set(betId, (settleWritesInFlight.get(betId) || 0) + 1)
-  showPage(currentPage)                       // instant feedback
+  if (rerenderBetCard(betId)) scheduleFullRerender()   // instant feedback
+  else showPage(currentPage)
   const { error } = await updateBetById(betId, patch)
   settleWritesInFlight.set(betId, settleWritesInFlight.get(betId) - 1)
   if (error) {
