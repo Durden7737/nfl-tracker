@@ -4631,8 +4631,39 @@ function deriveParlayResultFromLegs(legResults, length) {
   return 1
 }
 
+// ── OPTIMISTIC SETTLE ────────────────────────────────────────────
+// Before: every ✓ / ✗ / V click awaited the Supabase write, then re-downloaded
+// the ENTIRE bets table and only then re-rendered, so the button looked dead
+// for ~2 s. Now we patch the local copy, re-render immediately, write in the
+// background, and refresh just that one row from the calc view (for pl_cop).
+// On a failed write we reload and revert. (Ported from the Football tracker.)
+const settleWritesInFlight = new Map()   // betId → number of pending writes
+async function refreshBetRow(betId) {
+  const { data, error } = await supabase
+    .from('nfl_bets_with_calc').select('*').eq('id', betId).maybeSingle()
+  if (error || !data) return
+  if ((settleWritesInFlight.get(betId) || 0) > 0) return   // newer click in flight — don't clobber it
+  const i = allBets.findIndex(x => x.id === betId)
+  if (i >= 0) allBets[i] = data
+}
+async function optimisticBetUpdate(betId, patch, successLabel) {
+  const i = allBets.findIndex(x => x.id === betId); if (i < 0) return
+  allBets[i] = Object.assign({}, allBets[i], patch)
+  settleWritesInFlight.set(betId, (settleWritesInFlight.get(betId) || 0) + 1)
+  showPage(currentPage)                       // instant feedback
+  const { error } = await updateBetById(betId, patch)
+  settleWritesInFlight.set(betId, settleWritesInFlight.get(betId) - 1)
+  if (error) {
+    toast('Save failed — reverting: ' + error.message, 'error')
+    await loadBets(); showPage(currentPage)
+    return
+  }
+  if (successLabel) toast(successLabel, 'success')
+  await refreshBetRow(betId)
+}
+
 // Update a single leg's result inline, without finalizing the parlay overall.
-window.quickSetLegResult = async function(betId, legIndex, result) {
+window.quickSetLegResult = function(betId, legIndex, result) {
   const b = allBets.find(x => x.id === betId); if (!b) return
   if (!isParlayPick(b.pick)) return
   const legs = parseParlayLegs(b.pick)
@@ -4640,27 +4671,20 @@ window.quickSetLegResult = async function(betId, legIndex, result) {
   while (current.length < legs.length) current.push(null)
   // Click the same value again to un-set (back to pending)
   current[legIndex] = current[legIndex] === result ? null : result
-  const { error } = await updateBetById(betId, { leg_results: current })
-  if (error) { toast('Error: ' + error.message, 'error'); return }
-  await loadBets()
-  showPage(currentPage)
+  optimisticBetUpdate(betId, { leg_results: current })
 }
 
 // Settle a single (non-parlay) bet directly from the pending row.
-window.quickSettleSingle = async function(betId, result) {
+window.quickSettleSingle = function(betId, result) {
   const b = allBets.find(x => x.id === betId); if (!b) return
   const payload = { result }
   if (isParlayPick(b.pick)) payload.leg_results = null
-  const { error } = await updateBetById(betId, payload)
-  if (error) { toast('Error: ' + error.message, 'error'); return }
   const label = result === 1 ? '✅ Marked Won' : result === 0 ? '❌ Marked Lost' : '⬜ Voided'
-  toast(label, 'success')
-  await loadBets()
-  showPage(currentPage)
+  optimisticBetUpdate(betId, payload, label)
 }
 
 // Finalize a parlay row inline. Disabled until every leg has a 1/0/2 result.
-window.quickSettleParlay = async function(betId) {
+window.quickSettleParlay = function(betId) {
   const b = allBets.find(x => x.id === betId); if (!b) return
   if (!isParlayPick(b.pick)) return
   const legs = parseParlayLegs(b.pick)
@@ -4672,14 +4696,10 @@ window.quickSettleParlay = async function(betId) {
     }
   }
   const overall = deriveParlayResultFromLegs(lr, legs.length)
-  const { error } = await updateBetById(betId, { result: overall, leg_results: lr })
-  if (error) { toast('Error: ' + error.message, 'error'); return }
   const label = overall === 1 ? '✅ Parlay marked Won'
               : overall === 0 ? '❌ Parlay marked Lost'
               : '⬜ Parlay voided'
-  toast(label, 'success')
-  await loadBets()
-  showPage(currentPage)
+  optimisticBetUpdate(betId, { result: overall, leg_results: lr }, label)
 }
 
 // Build the row-level "Result" cell for a pending bet (used by the bets table).
