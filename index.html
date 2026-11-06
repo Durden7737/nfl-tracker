@@ -689,7 +689,7 @@
   .feed-avatar.clickable, .tipster-pill { cursor: pointer; }
   .tipster-hist-link { cursor: pointer; border-bottom: 1px dashed transparent; transition: all 0.12s; }
   .tipster-hist-link:hover { color: var(--blue); border-bottom-color: var(--blue); }
-  .th-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; margin-bottom: 14px; }
+  .th-stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-bottom: 14px; }
   .th-stat { background: var(--gray-50, #FAFAFB); border: 1px solid var(--gray-200); border-radius: 9px;
              padding: 8px 10px; display: flex; flex-direction: column; gap: 2px; }
   .th-stat-label { font-family: var(--font-mono); font-size: 8.5px; letter-spacing: 1px;
@@ -878,6 +878,29 @@
   .staged-tipster-chip.none { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; cursor: default; }
   .staged-tipster-field label { color: var(--blue); font-weight: 700; font-size: 10px; }
   .staged-tipster-field select { border-width: 2px; font-weight: 700; }
+  /* ═══ TIPSTER PERF (2026-11-06) — P/L · rank · win % chip shown next to every tipster ═══ */
+  .staged-tipster-stats { display: inline-flex; align-items: center; gap: 0; padding: 3px 0; border-radius: 999px;
+    border: 1px solid var(--gray-200, #e5e7eb); background: var(--gray-50, #f9fafb); font-size: 10.5px; font-weight: 600;
+    color: inherit; white-space: nowrap; line-height: 1; }
+  .staged-tipster-stats span { padding: 2px 9px; border-right: 1px solid var(--gray-200, #e5e7eb); }
+  .staged-tipster-stats b { color: inherit; }
+  .staged-tipster-stats span:last-child { border-right: 0; }
+  .staged-tipster-stats .lbl { font-weight: 700; font-size: 9px; letter-spacing: .04em; text-transform: uppercase; color: var(--gray-400, #9ca3af); margin-right: 4px; }
+  .staged-tipster-stats .pos { color: var(--green, #30D158); }
+  .staged-tipster-stats .neg { color: var(--red, #FF453A); }
+  .staged-tipster-stats .rank { color: var(--blue); }
+  .staged-tipster-stats .muted { color: var(--gray-400, #9ca3af); font-weight: 500; }
+  .feed-record { flex-wrap: wrap; align-items: center; }
+  .feed-record .staged-tipster-stats { font-size: 10px; }
+  /* compact badge: "#3/25 · 62%" — used beside tipster pills in dashboard / live / tables */
+  .tip-rank-badge { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--gray-200, #e5e7eb); background: var(--gray-50, #f9fafb); font-family: var(--font-mono, monospace);
+    font-size: 9.5px; font-weight: 700; color: var(--gray-500, #6b7280); white-space: nowrap; vertical-align: middle; line-height: 1.4; }
+  .tip-rank-badge .r { color: var(--blue); }
+  .tip-rank-badge .w { color: inherit; }
+  .tip-rank-badge.none { opacity: .6; }
+  .tip-rank-cell { font-family: var(--font-mono, monospace); font-weight: 800; color: var(--blue); white-space: nowrap; }
+  .tip-rank-cell.none { color: var(--gray-400, #9ca3af); font-weight: 500; }
   .staged-tipster-field select.no-tipster { border-color: #fca5a5; background: #fef2f2; }
   .staged-edit-field { display: flex; flex-direction: column; gap: 4px; }
   .staged-edit-field label { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.6px;
@@ -2481,6 +2504,7 @@ window.openTipsterHistory = function(name) {
   if (bodyEl) bodyEl.innerHTML = `
     ${unknownNote}
     <div class="th-stats">
+      <div class="th-stat"><span class="th-stat-label">Rank</span><span class="th-stat-value">${(() => { const p = tipsterPerfFor(name); return p && p.rank ? `#${p.rank}<span style="font-size:11px;opacity:.6">/${p.rankedCount}</span>` : '—' })()}</span></div>
       <div class="th-stat"><span class="th-stat-label">Bets</span><span class="th-stat-value">${bets.length}</span></div>
       <div class="th-stat"><span class="th-stat-label">Record</span><span class="th-stat-value">${wins}W · ${losses}L${pending ? ' · ' + pending + ' pend' : ''}</span></div>
       <div class="th-stat"><span class="th-stat-label">Win %</span><span class="th-stat-value">${winPct == null ? '—' : winPct + '%'}</span></div>
@@ -2582,6 +2606,7 @@ async function loadBets() {
     .order('id',   { ascending: false })
   if (error) { toast('Failed to load bets: ' + error.message, 'error'); return }
   allBets = data || []
+  tipsterPerfInvalidate()
 }
 async function insertBet(payload) {
   const { error } = await supabase.from('nfl_bets').insert([payload])
@@ -3079,7 +3104,7 @@ function dpTipsterRow(row) {
   const plText = hasSettled ? dpFmtCOP(pl) : '—'
   const badges = bets.map(dpBetResultBadge).join('')
   return `<div class="day-tipster-row">
-    <div class="dt-name">${tipsterPill(name)}</div>
+    <div class="dt-name">${tipsterPill(name)}${tipsterRankBadge(name)}</div>
     <div class="dt-results">${badges}</div>
     <div class="dt-pl ${plCls}">${plText}</div>
   </div>`
@@ -3480,6 +3505,7 @@ function renderTipsterBreakdown() {
       const isLeader = i === 0 && g.stake > 0 && g.pl > 0
       const medal = isLeader ? '<span class="rank-medal" title="Top performer">🏆</span>' : ''
       return `<tr class="${isLeader ? 'row-leader' : ''}">
+        <td>${tipsterRankCell(key)}</td>
         <td><div class="name-cell">${medal}<span class="tipster-hist-link" data-tipster="${escapeHtml(key)}" onclick="openTipsterHistory(this.dataset.tipster)" title="View full history for ${escapeHtml(key)}">${escapeHtml(key)}</span></div></td>
         ${betsCell}
         ${picksCell}
@@ -3497,8 +3523,8 @@ function renderTipsterBreakdown() {
       <span class="breakdown-header-meta">${sorted.length} ${sorted.length === 1 ? 'tipster' : 'tipsters'}</span>
     </div>
     <table class="breakdown-table">
-      <thead><tr><th>Name</th><th>Total Bets</th><th>Total Picks</th><th>Win % (Bets)</th><th>Win % (Picks)</th><th>P/L</th><th>ROI</th></tr></thead>
-      <tbody>${rows || '<tr><td colspan="7" class="breakdown-empty">No bets yet</td></tr>'}</tbody>
+      <thead><tr><th>#</th><th>Name</th><th>Total Bets</th><th>Total Picks</th><th>Win % (Bets)</th><th>Win % (Picks)</th><th>P/L</th><th>ROI</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="8" class="breakdown-empty">No bets yet</td></tr>'}</tbody>
     </table>
   </div>`
 }
@@ -3870,7 +3896,7 @@ function renderLiveBetItem(b, matchKey) {
       <div class="live-bet-row-head">
         <div class="live-bet-row-head-left">
           ${typeBadge}
-          ${b.tipster ? tipsterPill(b.tipster) : ''}
+          ${b.tipster ? tipsterPill(b.tipster) + tipsterRankBadge(b.tipster) : ''}
         </div>
         <div class="live-bet-row-head-right">
           <span class="live-bet-odds">${oddsTxt}</span>
@@ -3973,9 +3999,9 @@ function renderBetsTable(bets, showSettle = false, sortable = false) {
 
     // ── record line
     const rec = recordFor(b.tipster)
-    const recHtml = rec ? `<div class="feed-record">
-        <span class="feed-record-pl ${rec.pl >= 0 ? 'pos' : 'neg'}">${rec.pl >= 0 ? '+' : ''}${COP(rec.pl)}</span>
-        <span class="feed-record-txt">${rec.w}-${rec.l} last ${rec.n} settled pick${rec.n === 1 ? '' : 's'} by <strong>${escapeHtml(b.tipster)}</strong>${rec.n >= 3 && rec.w / rec.n >= 0.6 ? ' 🔥' : ''}</span>
+    const recHtml = (rec || b.tipster) ? `<div class="feed-record">
+        ${tipsterStatsChip(b.tipster, 'feed-' + b.id)}
+        ${rec ? `<span class="feed-record-txt">${rec.w}-${rec.l} last ${rec.n} settled pick${rec.n === 1 ? '' : 's'} by <strong>${escapeHtml(b.tipster)}</strong>${rec.n >= 3 && rec.w / rec.n >= 0.6 ? ' 🔥' : ''}</span>` : ''}
       </div>` : ''
 
     // ── analysis (notes)
@@ -4648,6 +4674,7 @@ async function refreshBetRow(betId) {
   if ((settleWritesInFlight.get(betId) || 0) > 0) return   // newer click in flight — don't clobber it
   const i = allBets.findIndex(x => x.id === betId)
   if (i >= 0) allBets[i] = data
+  tipsterPerfInvalidate()
 }
 // Re-render ONLY the clicked bet's card (the Pending page can hold hundreds
 // of cards; rebuilding all of them on every ✓/✗ click is what caused the lag).
@@ -4680,6 +4707,7 @@ function rerenderBetCard(betId) {
 async function optimisticBetUpdate(betId, patch, successLabel) {
   const i = allBets.findIndex(x => x.id === betId); if (i < 0) return
   allBets[i] = Object.assign({}, allBets[i], patch)
+  tipsterPerfInvalidate()
   settleWritesInFlight.set(betId, (settleWritesInFlight.get(betId) || 0) + 1)
   if (rerenderBetCard(betId)) scheduleFullRerender()   // instant feedback
   else showPage(currentPage)
@@ -4996,10 +5024,14 @@ function computeTipsterStats() {
 
 function renderTipstersPage() {
   const stats = computeTipsterStats()
-  const names = Object.keys(stats).sort((a, b) => a.localeCompare(b))
+  const _perf = tipsterPerfAll()
+  const names = Object.keys(stats).sort((a, b) => {
+    const ra = _perf.rank[a] || 1e9, rb = _perf.rank[b] || 1e9
+    return ra - rb || a.localeCompare(b)
+  })
 
   const rows = names.length === 0
-    ? `<tr><td colspan="7" style="text-align:center;color:var(--gray-400);padding:40px;">
+    ? `<tr><td colspan="10" style="text-align:center;color:var(--gray-400);padding:40px;">
          No tipsters yet. Click <strong>+ Add Tipster</strong> to add one.
        </td></tr>`
     : names.map(name => {
@@ -5013,13 +5045,21 @@ function renderTipstersPage() {
       const wrCell = wr !== null
         ? `${wr}%`
         : `<span style="color:var(--gray-400)">—</span>`
+      const perf = tipsterPerfFor(name)
+      const betRec = perf && (perf.won + perf.lost) > 0
+        ? `${perf.won}W · ${perf.lost}L`
+        : '<span style="color:var(--gray-400)">—</span>'
+      const betWr = perf && perf.winPct !== null ? `${perf.winPct}%` : '<span style="color:var(--gray-400)">—</span>'
       return `<tr>
+        <td>${tipsterRankCell(name)}</td>
         <td>${tipsterPill(name)}</td>
         <td style="min-width:190px; max-width:280px;">
           ${renderTipsterLinksCell(name)}
         </td>
         <td>${s.bets}</td>
-        <td>${totalLegs > 0 ? `${s.legWins}W · ${s.legLosses}L legs` : '<span style="color:var(--gray-400)">—</span>'}${s.pending ? ` <span style="color:var(--gray-400);font-size:9.5px">(${s.pending} pend)</span>` : ''}</td>
+        <td>${betRec}${s.pending ? ` <span style="color:var(--gray-400);font-size:9.5px">(${s.pending} pend)</span>` : ''}</td>
+        <td>${betWr}</td>
+        <td>${totalLegs > 0 ? `${s.legWins}W · ${s.legLosses}L` : '<span style="color:var(--gray-400)">—</span>'}</td>
         <td>${wrCell}</td>
         <td>${plCell}</td>
         <td>
@@ -5039,7 +5079,7 @@ function renderTipstersPage() {
     </div>
     <table class="tipsters-table">
       <thead><tr>
-        <th>Name</th><th>Web Page</th><th>Bets</th><th>W/L (legs)</th><th>Win %</th><th>Net P/L</th><th></th>
+        <th>Rank</th><th>Name</th><th>Web Page</th><th>Bets</th><th>W/L (bets)</th><th>Win % (bets)</th><th>W/L (legs)</th><th>Win % (legs)</th><th>Net P/L</th><th></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`
@@ -7171,6 +7211,89 @@ function getStagedView() {
   })
 }
 
+// ── TIPSTER PERF (2026-11-06) — P/L · rank · win % for every tipster ──────────
+// One shared source of truth used by every tab: feed cards (All Bets / Pending /
+// Live), Staged card headers, the Tipsters tab, the dashboard By-Tipster table,
+// the Daily Performance board and the tipster history modal.
+//   • Win % is BET-level: won bets / (won + lost bets). Voids & pending excluded.
+//   • Rank is by net P/L over settled money bets; tipsters with no settled money
+//     bets are unranked ("—"). rankedCount = size of the ranked pool.
+// Results are cached for 1.5 s so rapid ✓/✗ clicks never recompute per card;
+// tipsterPerfInvalidate() is called whenever allBets changes.
+let _tipPerfCache = null, _tipPerfAt = 0
+function tipsterPerfInvalidate() { _tipPerfCache = null }
+function tipsterPerfAll() {
+  const now = Date.now()
+  if (_tipPerfCache && (now - _tipPerfAt) < 1500) return _tipPerfCache
+  const stats = {}
+  for (const b of allBets) {
+    const n = (b.tipster || '').trim()
+    if (!n) continue
+    const s = stats[n] || (stats[n] = { bets: 0, won: 0, lost: 0, voids: 0, pending: 0, settled: 0, stake: 0, pl: 0 })
+    s.bets++
+    const r = b.result
+    if (r === null || r === undefined) { s.pending++; continue }
+    s.settled++
+    if (r === 1 || r === 'won') s.won++
+    else if (r === 0 || r === 'lost') s.lost++
+    else s.voids++
+    if (!isTrackingBet(b)) { s.stake += Number(b.stake_cop || 0); s.pl += Number(b.pl_cop || 0) }
+  }
+  const ranked = Object.keys(stats).filter(n => stats[n].stake > 0).sort((a, b) => stats[b].pl - stats[a].pl || stats[b].won - stats[a].won)
+  const rank = {}
+  ranked.forEach((n, i) => { rank[n] = i + 1 })
+  _tipPerfCache = { stats, rank, rankedCount: ranked.length }
+  _tipPerfAt = now
+  return _tipPerfCache
+}
+function tipsterPerfFor(name) {
+  const n = (name || '').trim()
+  if (!n) return null
+  const { stats, rank, rankedCount } = tipsterPerfAll()
+  const s = stats[n]
+  if (!s) return null
+  const dec = s.won + s.lost
+  return Object.assign({ name: n, rank: rank[n] || null, rankedCount, decided: dec, winPct: dec > 0 ? Math.round(s.won / dec * 100) : null }, s)
+}
+// Full chip: [P/L +$x] [Rank #3/25] [Win 62% · 45W-28L · 80 bets]
+function tipsterStatsChip(name, id) {
+  const n = (name || '').trim()
+  const wrapId = `staged-tipster-stats-${id}`
+  if (!n) return `<span class="staged-tipster-stats" id="${wrapId}" style="display:none"></span>`
+  const p = tipsterPerfFor(n)
+  if (!p || p.bets === 0) {
+    return `<span class="staged-tipster-stats" id="${wrapId}" title="No bets recorded yet for ${escapeHtml(n)}"><span class="muted">no history</span></span>`
+  }
+  const plHtml = p.stake > 0
+    ? `<span><span class="lbl">P/L</span><b class="${p.pl >= 0 ? 'pos' : 'neg'}">${p.pl >= 0 ? '+' : ''}${COP(p.pl)}</b></span>`
+    : `<span><span class="lbl">P/L</span><span class="muted">—</span></span>`
+  const rankHtml = p.rank
+    ? `<span><span class="lbl">Rank</span><b class="rank">#${p.rank}</b><span class="muted">/${p.rankedCount}</span></span>`
+    : `<span><span class="lbl">Rank</span><span class="muted">—</span></span>`
+  const wrHtml = p.winPct !== null
+    ? `<span><span class="lbl">Win</span><b>${p.winPct}%</b><span class="muted">&nbsp;· ${p.won}W-${p.lost}L · ${p.bets} bets</span></span>`
+    : `<span><span class="lbl">Win</span><span class="muted">— · ${p.bets} bets</span></span>`
+  const title = `${n}: ${p.bets} bets (${p.settled} settled, ${p.pending} pending${p.voids ? ', ' + p.voids + ' void' : ''}) · ${p.won}W-${p.lost}L · net P/L ${COP(p.pl)}` + (p.rank ? ` · rank #${p.rank} of ${p.rankedCount} by P/L` : '')
+  return `<span class="staged-tipster-stats" id="${wrapId}" title="${escapeHtml(title)}">${plHtml}${rankHtml}${wrHtml}</span>`
+}
+// Compact badge: "#3/25 · 62%" (or "— · 62%" when unranked). Sits beside a tipster pill.
+function tipsterRankBadge(name) {
+  const p = tipsterPerfFor(name)
+  if (!p || p.bets === 0) return ''
+  const r = p.rank ? `<span class="r">#${p.rank}</span><span class="muted">/${p.rankedCount}</span>` : `<span class="muted">—</span>`
+  const w = p.winPct !== null ? `<span class="w">${p.winPct}%</span>` : `<span class="muted">—%</span>`
+  const title = `${p.name}: ${p.won}W-${p.lost}L (${p.winPct === null ? '—' : p.winPct + '%'}) · ${p.bets} bets · P/L ${COP(p.pl)}` + (p.rank ? ` · rank #${p.rank}/${p.rankedCount}` : ' · unranked (no settled money bets)')
+  return `<span class="tip-rank-badge${p.rank ? '' : ' none'}" title="${escapeHtml(title)}">${r} · ${w}</span>`
+}
+// Table cell for Tipsters tab / dashboard: "#3" or "—"
+function tipsterRankCell(name) {
+  const p = tipsterPerfFor(name)
+  return p && p.rank ? `<span class="tip-rank-cell" title="Rank by net P/L (${p.rank} of ${p.rankedCount})">#${p.rank}</span>` : `<span class="tip-rank-cell none" title="Unranked — no settled money bets">—</span>`
+}
+// Football-parity aliases
+const stagedTipsterStatsChip = tipsterStatsChip
+window.tipsterPerfAll = tipsterPerfAll
+
 function renderStagedPage() {
   const view = getStagedView()
   const viewIds = new Set(view.map(b => String(b.id)))
@@ -7452,6 +7575,7 @@ function renderStagedCard(b) {
         <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
           ${srcChip}
           ${tipsterChip}
+          ${tipsterStatsChip(b.tipster, b.id)}
           <div style="font-family:var(--font-display); font-weight:700; font-size:13.5px;">
             ${escapeHtml(b.match_name || 'Unknown match')}
           </div>
@@ -7714,6 +7838,8 @@ window.setStagedTipster = function(id, val) {
   const chip = document.getElementById('staged-tipster-chip-' + id)
   const sel  = document.getElementById('staged-tipster-select-' + id)
   if (sel) sel.classList.toggle('no-tipster', !name)
+  const statsEl = document.getElementById('staged-tipster-stats-' + id)
+  if (statsEl) statsEl.outerHTML = tipsterStatsChip(name, id)
   if (chip) {
     if (name) {
       const c = tipsterColor(name)
