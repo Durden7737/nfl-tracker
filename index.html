@@ -227,6 +227,7 @@
                           color: var(--gray-400); cursor: pointer; padding: 4px 6px; }
   .pending-search-clear:hover { color: var(--red, #dc2626); }
   .pending-filter-summary { font-family: var(--font-mono); font-size: 11px; color: var(--gray-600); }
+  .pending-game-select { max-width: 320px; min-width: 160px; }
   .pending-match-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
   .pending-match-chips .chip { padding: 5px 11px; border-radius: 999px;
                                border: 1px solid var(--gray-200); background: var(--white);
@@ -3607,19 +3608,17 @@ function renderPendingPage() {
 
   // Unique match names among pending bets → chip filter.
   // Sorted alphabetically for stable UI; each chip shows a count.
+  const canon = buildGameCanon(pending)
+  const gamesOf = b => [...new Set(betGameKeys(b).map(canon))]
   const matchCounts = new Map()
-  pending.forEach(b => {
-    const m = (b.match_name || '').trim()
-    if (!m) return
-    matchCounts.set(m, (matchCounts.get(m) || 0) + 1)
-  })
+  pending.forEach(b => gamesOf(b).forEach(m => matchCounts.set(m, (matchCounts.get(m) || 0) + 1)))
   const matches = [...matchCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))
 
   // Apply the free-text + match filters. Free text matches any of:
   // match_name, pick, tipster, competition, matchday, bet_type, region, notes.
   const q = pendingSearch.trim().toLowerCase()
   const filtered = pending.filter(b => {
-    if (pendingMatchFilter && (b.match_name || '') !== pendingMatchFilter) return false
+    if (pendingMatchFilter && !gamesOf(b).includes(pendingMatchFilter)) return false
     if (!q) return true
     const hay = [
       b.match_name, b.pick, b.tipster, b.competition,
@@ -3652,6 +3651,10 @@ function renderPendingPage() {
                oninput="setPendingSearch(this.value)" />
         ${pendingSearch ? `<button class="pending-search-clear" onclick="setPendingSearch('')" title="Clear">✕</button>` : ''}
       </div>
+      <select class="filter-select pending-game-select" onchange="setPendingMatchFilter(this.value)" title="Filter by game (same as the chips below)">
+        <option value="">🏈 All games (${pending.length})</option>
+        ${matches.map(([m, c]) => `<option value="${escapeHtml(m)}"${m === pendingMatchFilter ? ' selected' : ''}>${escapeHtml(m)} (${c})</option>`).join('')}
+      </select>
       <div class="pending-filter-summary">
         Showing <strong>${shownCount}</strong> of <strong>${pending.length}</strong>${(pendingSearch || pendingMatchFilter) ? ' · <a href="#" onclick="clearPendingFilters();return false;" style="color:var(--blue); text-decoration:underline;">reset</a>' : ''}
       </div>
@@ -3709,6 +3712,44 @@ window.setPendingSearch = function(v) {
 window.setPendingMatchFilter = function(m) {
   pendingMatchFilter = String(m || '')
   showPage('pending')
+}
+// PENDING GAME FILTER v2 (2026-11-06) — chips + dropdown (same filter); one chip per real
+// game (parlays contribute every game their legs touch, so selecting a game also
+// shows the parlays that include it).
+// Games a bet touches: [match_name] for singles; for parlays, each leg's game
+// ("[Game · Competition]" context, else the "Parlay: A, B" label parts).
+function betGameKeys(b) {
+  if (!isParlayPick(b.pick)) { const m = (b.match_name || '').trim(); return m ? [m] : [] }
+  const out = [], seen = new Set()
+  const add = g => { g = (g || '').trim(); if (g && !seen.has(g)) { seen.add(g); out.push(g) } }
+  parseParlayLegs(b.pick).forEach(l => add((l.context || '').split(' · ')[0]))
+  if (!out.length) String(b.match_name || '').replace(/^Parlay:\s*/i, '').split(/,\s*/).forEach(add)
+  return out
+}
+// "Celtics at Hornets" and "Boston Celtics at Charlotte Hornets" are the same
+// game → canonicalize every key onto the fullest name that shares both teams.
+function buildGameCanon(bets) {
+  const names = new Set(); bets.forEach(b => betGameKeys(b).forEach(g => names.add(g)))
+  const teams = n => { const m = n.split(/\s+(?:at|vs\.?|@|v)\s+/i); return m.length === 2 ? m.map(t => t.trim().toLowerCase()) : null }
+  // same team? full name ends with the nickname, or (truncated entry) the last words share a ≥4-char prefix
+  const same = (full, short) => {
+    if (!full || !short) return false
+    if (full.endsWith(short) || short.endsWith(full)) return true
+    const a = full.split(/\s+/).pop(), b = short.split(/\s+/).pop()
+    return a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a))
+  }
+  const list = [...names].sort((a, b) => b.length - a.length)   // longest (fullest) first
+  const canon = new Map()
+  for (const n of list) {
+    const t = teams(n); let hit = null
+    if (t) for (const c of list) {
+      if (c === n || c.length < n.length) continue
+      const ct = teams(c); if (!ct) continue
+      if (same(ct[0], t[0]) && same(ct[1], t[1])) { hit = canon.get(c) || c; break }
+    }
+    canon.set(n, hit || n)
+  }
+  return k => canon.get(k) || k
 }
 window.clearPendingFilters = function() {
   pendingSearch = ''
