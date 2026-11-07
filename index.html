@@ -182,16 +182,22 @@
   .day-card-body { padding: 6px 6px; display: flex; flex-direction: column; }
   .day-card-empty { padding: 18px 14px; text-align: center; color: var(--gray-400);
                     font-size: 10.5px; font-style: italic; }
+  /* DAILY ROW v2 (2026-11-07): two lines — [tipster · rank badge … P/L] / [result dots] */
   .day-tipster-row { display: grid;
-                     grid-template-columns: minmax(0, 1.4fr) auto auto;
-                     gap: 6px; align-items: center; padding: 6px 8px; border-radius: 6px;
+                     grid-template-columns: minmax(0, 1fr) auto;
+                     grid-template-areas: "name pl" "res res";
+                     column-gap: 8px; row-gap: 4px; align-items: center; padding: 7px 8px; border-radius: 6px;
                      font-size: 10.5px; }
+  .day-tipster-row .dt-name { grid-area: name; }
+  .day-tipster-row .dt-pl { grid-area: pl; }
+  .day-tipster-row .dt-results { grid-area: res; }
   .day-tipster-row + .day-tipster-row { border-top: 1px dashed var(--gray-200);
                                          border-radius: 0; }
   .day-tipster-row:hover { background: #FAFAFB; }
-  .day-tipster-row .dt-name { min-width: 0; overflow: hidden; }
-  .day-tipster-row .dt-results { display: inline-flex; gap: 3px; align-items: center;
-                                 flex-wrap: wrap; justify-content: flex-end; }
+  .day-tipster-row .dt-name { min-width: 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .day-tipster-row .dt-name .tip-rank-badge { margin-left: 0; }
+  .day-tipster-row .dt-results { display: flex; gap: 3px; align-items: center;
+                                 flex-wrap: wrap; justify-content: flex-start; }
   .day-tipster-row .dt-pl { font-family: var(--font-mono); font-weight: 700;
                             text-align: right; font-size: 10.5px; min-width: 60px; }
   .day-tipster-row .dt-pl.pos { color: var(--green); }
