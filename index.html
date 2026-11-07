@@ -3719,11 +3719,14 @@ window.setPendingMatchFilter = function(m) {
 // Games a bet touches: [match_name] for singles; for parlays, each leg's game
 // ("[Game · Competition]" context, else the "Parlay: A, B" label parts).
 function betGameKeys(b) {
-  if (!isParlayPick(b.pick)) { const m = (b.match_name || '').trim(); return m ? [m] : [] }
   const out = [], seen = new Set()
   const add = g => { g = (g || '').trim(); if (g && !seen.has(g)) { seen.add(g); out.push(g) } }
+  // "Parlay: A, B" / "A @ B + C @ D" labels → one game per part
+  const parts = s => String(s || '').replace(/^Parlay:\s*/i, '').split(/\s*\+\s*|,\s*/)
+  const mn = (b.match_name || '').trim()
+  if (!isParlayPick(b.pick)) { if (/\s\+\s/.test(mn)) parts(mn).forEach(add); else add(mn); return out }
   parseParlayLegs(b.pick).forEach(l => add((l.context || '').split(' · ')[0]))
-  if (!out.length) String(b.match_name || '').replace(/^Parlay:\s*/i, '').split(/,\s*/).forEach(add)
+  if (!out.length || /\s\+\s/.test(mn)) parts(mn).forEach(add)
   return out
 }
 // "Celtics at Hornets" and "Boston Celtics at Charlotte Hornets" are the same
