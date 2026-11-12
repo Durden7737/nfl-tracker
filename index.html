@@ -908,6 +908,15 @@
   .tip-rank-badge.none { opacity: .6; }
   .tip-rank-cell { font-family: var(--font-mono, monospace); font-weight: 800; color: var(--blue); white-space: nowrap; }
   .tip-rank-cell.none { color: var(--gray-400, #9ca3af); font-weight: 500; }
+  /* TIPSTER PERF v2 (2026-11-08) — rank fragments for the 3 rankings */
+  .staged-tipster-stats .rk { color: var(--blue); font-weight: 800; margin-left: 5px; font-family: var(--font-mono, monospace); }
+  .staged-tipster-stats .rk.none { color: var(--gray-400, #9ca3af); font-weight: 500; }
+  .staged-tipster-stats .rk .muted { font-weight: 500; }
+  .tip-rank-tag { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 6px; border: 1px solid var(--gray-200, #e5e7eb);
+    background: var(--gray-50, #f9fafb); font-family: var(--font-mono, monospace); font-size: 9.5px; font-weight: 800; color: var(--blue);
+    white-space: nowrap; vertical-align: middle; line-height: 1.5; }
+  .tip-rank-tag .muted { color: var(--gray-400, #9ca3af); font-weight: 500; }
+  .winbar-rank-wrap { display: inline-flex; align-items: center; gap: 2px; }
   .staged-tipster-field select.no-tipster { border-color: #fca5a5; background: #fef2f2; }
   .staged-edit-field { display: flex; flex-direction: column; gap: 4px; }
   .staged-edit-field label { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.6px;
@@ -2017,6 +2026,16 @@
   @media (max-width: 700px) and (display-mode: standalone) {
     html, body { overscroll-behavior-y: none; }
   }
+
+  /* ═══ DASHBOARD TIPSTER LINKS (2026-11-08) ═══ */
+  .breakdown-table a.tipster-url { color: inherit; text-decoration: none; }
+  .breakdown-table a.tipster-url:hover { color: var(--blue); border-bottom-color: var(--blue); }
+  .tipster-url-arrow { font-size: 0.8em; opacity: 0.55; margin-left: 3px; }
+  .tipster-url:hover .tipster-url-arrow { opacity: 1; }
+  .tipster-url-2 { font-size: 0.85em; color: var(--gray-400); text-decoration: none; margin-left: 2px; }
+  .tipster-url-2:hover { color: var(--blue); }
+  .tipster-hist-ico { font-size: 0.8em; opacity: 0.35; cursor: pointer; margin-left: 4px; transition: opacity 0.12s; }
+  .tipster-hist-ico:hover { opacity: 1; }
 </style>
 </head>
 <body>
@@ -2511,7 +2530,9 @@ window.openTipsterHistory = function(name) {
   if (bodyEl) bodyEl.innerHTML = `
     ${unknownNote}
     <div class="th-stats">
-      <div class="th-stat"><span class="th-stat-label">Rank</span><span class="th-stat-value">${(() => { const p = tipsterPerfFor(name); return p && p.rank ? `#${p.rank}<span style="font-size:11px;opacity:.6">/${p.rankedCount}</span>` : '—' })()}</span></div>
+      <div class="th-stat"><span class="th-stat-label">Rank P/L</span><span class="th-stat-value">${(() => { const p = tipsterPerfFor(name); return p && p.rank ? `#${p.rank}<span style="font-size:11px;opacity:.6">/${p.rankedCount}</span>` : '—' })()}</span></div>
+      <div class="th-stat"><span class="th-stat-label">Rank bets W%</span><span class="th-stat-value">${(() => { const p = tipsterPerfFor(name); return p && p.rankBet ? `#${p.rankBet}<span style="font-size:11px;opacity:.6">/${p.rankedBetCount}</span>` : '—' })()}</span></div>
+      <div class="th-stat"><span class="th-stat-label">Rank picks W%</span><span class="th-stat-value">${(() => { const p = tipsterPerfFor(name); return p && p.rankPick ? `#${p.rankPick}<span style="font-size:11px;opacity:.6">/${p.rankedPickCount}</span>` : '—' })()}</span></div>
       <div class="th-stat"><span class="th-stat-label">Bets</span><span class="th-stat-value">${bets.length}</span></div>
       <div class="th-stat"><span class="th-stat-label">Record</span><span class="th-stat-value">${wins}W · ${losses}L${pending ? ' · ' + pending + ' pend' : ''}</span></div>
       <div class="th-stat"><span class="th-stat-label">Win %</span><span class="th-stat-value">${winPct == null ? '—' : winPct + '%'}</span></div>
@@ -2811,7 +2832,101 @@ function loadTipsterLinks() {
   try { return JSON.parse(localStorage.getItem(TIPSTER_LINKS) || '{}') || {} }
   catch { return {} }
 }
-function saveTipsterLinks(obj) { localStorage.setItem(TIPSTER_LINKS, JSON.stringify(obj)) }
+// ── TIPSTER LINKS CLOUD SYNC (2026-11-12) ─────────────────────────────────────
+// Links live in the browser (fast, offline) AND in Supabase table `tipster_links`
+// (tracker, name, links jsonb) so every device shows the same handles.
+// First sync on a device: its links are merged up (nothing typed is lost).
+// Afterwards the cloud copy is the source of truth; local edits are pushed ~0.7 s later.
+const TL_TRACKER = 'nfl'
+const TL_FLAG  = TIPSTER_LINKS + '_cloud_v1'
+const TL_DIRTY = TIPSTER_LINKS + '_cloud_dirty'
+let _tlRemote = null, _tlPushTimer = null, _tlLastPull = 0, _tlBusy = false
+function tlNorm(v) {
+  const arr = Array.isArray(v) ? v : (typeof v === 'string' ? [v] : [])
+  return arr.map(x => String(x || '').trim()).filter(Boolean).slice(0, 2)
+}
+function tlNormAll(obj) {
+  const o = {}
+  for (const [k, v] of Object.entries(obj || {})) { const n = tlNorm(v); if (k && n.length) o[k] = n }
+  return o
+}
+function tlSame(a, b) { return JSON.stringify(a || null) === JSON.stringify(b || null) }
+function saveTipsterLinks(obj) {
+  localStorage.setItem(TIPSTER_LINKS, JSON.stringify(obj))
+  queueTipsterLinksPush()
+}
+function queueTipsterLinksPush() {
+  if (!SUPABASE_CONFIGURED) return
+  try { localStorage.setItem(TL_DIRTY, '1') } catch {}
+  clearTimeout(_tlPushTimer)
+  _tlPushTimer = setTimeout(() => { _tlPushTimer = null; pushTipsterLinksNow() }, 700)
+}
+async function pushTipsterLinksNow() {
+  if (!SUPABASE_CONFIGURED) return
+  if (!_tlRemote) return syncTipsterLinksFromCloud(true)
+  if (_tlBusy) return queueTipsterLinksPush()
+  _tlBusy = true
+  try {
+    const local = tlNormAll(loadTipsterLinks())
+    const ups  = Object.keys(local).filter(n => !tlSame(local[n], _tlRemote[n]))
+    const dels = Object.keys(_tlRemote).filter(n => !local[n])
+    if (ups.length) {
+      const rows = ups.map(n => ({ tracker: TL_TRACKER, name: n, links: local[n], updated_at: new Date().toISOString() }))
+      const { error } = await supabase.from('tipster_links').upsert(rows, { onConflict: 'tracker,name' })
+      if (error) throw error
+    }
+    if (dels.length) {
+      const { error } = await supabase.from('tipster_links').delete().eq('tracker', TL_TRACKER).in('name', dels)
+      if (error) throw error
+    }
+    _tlRemote = local
+    if (!_tlPushTimer) localStorage.removeItem(TL_DIRTY)
+  } catch (e) { console.warn('[tipster-links] cloud save failed — will retry on next load', e) }
+  finally { _tlBusy = false }
+}
+async function syncTipsterLinksFromCloud(force) {
+  if (!SUPABASE_CONFIGURED || _tlBusy || _tlPushTimer) return
+  if (!force && Date.now() - _tlLastPull < 15000) return
+  _tlBusy = true; _tlLastPull = Date.now()
+  let changed = false, ok = false
+  try {
+    const { data, error } = await supabase.from('tipster_links').select('name,links').eq('tracker', TL_TRACKER)
+    if (error) throw error
+    const remote = {}
+    ;(data || []).forEach(r => { const n = tlNorm(r.links); if (r.name && n.length) remote[r.name] = n })
+    const rawLocal = loadTipsterLinks(), local = tlNormAll(rawLocal)
+    const first = !localStorage.getItem(TL_FLAG), dirty = !!localStorage.getItem(TL_DIRTY)
+    const seed = (typeof DEFAULT_TIPSTER_LINKS !== 'undefined') ? tlNormAll(DEFAULT_TIPSTER_LINKS) : {}
+    let merged
+    if (first) {
+      // Migration: keep everything typed on this device; untouched seed defaults yield to the cloud.
+      merged = { ...remote }
+      for (const [n, l] of Object.entries(local)) {
+        if (!remote[n]) merged[n] = l
+        else if (!tlSame(l, seed[n])) merged[n] = [...new Set([...l, ...remote[n]])].slice(0, 2)
+      }
+    } else if (dirty) merged = { ...remote, ...local }   // unsent local edits win
+    else merged = remote                                  // cloud is the source of truth
+    const out = {}
+    for (const [n, l] of Object.entries(merged)) out[n] = tlSame(l, local[n]) ? rawLocal[n] : l
+    for (const [n, v] of Object.entries(rawLocal)) if (!(n in out) && !local[n]) out[n] = v   // keep empty slots being edited
+    const sortKeys = o => JSON.stringify(Object.keys(o).sort().map(k => [k, o[k]]))
+    if (sortKeys(out) !== sortKeys(rawLocal)) { localStorage.setItem(TIPSTER_LINKS, JSON.stringify(out)); changed = true }
+    _tlRemote = remote
+    localStorage.setItem(TL_FLAG, '1')
+    ok = true
+  } catch (e) { console.warn('[tipster-links] cloud load failed', e) }
+  finally { _tlBusy = false }
+  if (ok) await pushTipsterLinksNow()
+  if (changed) {
+    try {
+      const a = document.activeElement
+      if (!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName))) showPage(currentPage)
+    } catch {}
+  }
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) syncTipsterLinksFromCloud() })
+// ── /TIPSTER LINKS CLOUD SYNC ─────────────────────────────────────────────────
 // Returns the saved links for a tipster as an array of length 0, 1, or 2.
 // Preserves empty-string slots (so a freshly-added second slot stays visible).
 // Backward compatible with older { name: 'url' } string entries.
@@ -2825,6 +2940,21 @@ function getTipsterLinksRaw(name) {
     return t ? [t] : []
   }
   return []
+}
+
+// ═══ DASHBOARD TIPSTER LINKS (2026-11-08) ═══
+// Dashboard "By Tipster" name → hyperlink to the tipster's saved URL (slot 1; slot 2 as a small ②).
+// Falls back to the history modal when no link is saved. 🕘 always opens the history.
+function tipsterDashNameCell(name) {
+  const links = (typeof getTipsterLinksRaw === 'function' ? getTipsterLinksRaw(name) : []).filter(Boolean)
+  const esc = escapeHtml(name)
+  const hist = `<span class="tipster-hist-ico" data-tipster="${esc}" onclick="event.stopPropagation(); openTipsterHistory(this.dataset.tipster)" title="View full history for ${esc}">🕘</span>`
+  if (!links.length) {
+    return `<span class="tipster-hist-link" data-tipster="${esc}" onclick="openTipsterHistory(this.dataset.tipster)" title="No link saved — view full history for ${esc}">${esc}</span>${hist}`
+  }
+  const a1 = `<a class="tipster-hist-link tipster-url" href="${escapeHtml(links[0])}" target="_blank" rel="noopener noreferrer" title="Open ${esc}: ${escapeHtml(links[0])}">${esc}<span class="tipster-url-arrow">↗</span></a>`
+  const a2 = links[1] ? `<a class="tipster-url-2" href="${escapeHtml(links[1])}" target="_blank" rel="noopener noreferrer" title="2nd link: ${escapeHtml(links[1])}">②</a>` : ''
+  return a1 + a2 + hist
 }
 function addTipster(name) {
   name = (name || '').trim()
@@ -2923,6 +3053,7 @@ async function init() {
   await loadBets()
   await loadStagedBets()
   seedDefaultTipstersOnce()
+  syncTipsterLinksFromCloud(true)   // TIPSTER LINKS CLOUD SYNC (2026-11-12)
   populateTipsterSelect()
   refreshStagedBadge()
   // Restore where the user was (and the cards they had) instead of always
@@ -3500,8 +3631,8 @@ function renderTipsterBreakdown() {
         ? `<td><span class="cell-count">${g.bets}<span class="cc-sub">${g.pending} pend</span></span></td>`
         : `<td>${g.bets}</td>`
       const picksCell     = `<td>${g.picks}</td>`
-      const wpctBetsCell  = `<td>${winbarHtml(winPctBets,  betRank)}</td>`
-      const wpctPicksCell = `<td>${winbarHtml(winPctPicks, pickRank)}</td>`
+      const wpctBetsCell  = `<td><span class="winbar-rank-wrap">${winbarHtml(winPctBets,  betRank)}${tipsterRankTag(key, 'bet')}</span></td>`
+      const wpctPicksCell = `<td><span class="winbar-rank-wrap">${winbarHtml(winPctPicks, pickRank)}${tipsterRankTag(key, 'pick')}</span></td>`
       const plCell        = g.stake > 0
         ? `<td class="${plClass}">${g.pl >= 0 ? '+' : ''}${COP(g.pl)}</td>`
         : `<td style="color:var(--gray-400)">—</td>`
@@ -3513,7 +3644,7 @@ function renderTipsterBreakdown() {
       const medal = isLeader ? '<span class="rank-medal" title="Top performer">🏆</span>' : ''
       return `<tr class="${isLeader ? 'row-leader' : ''}">
         <td>${tipsterRankCell(key)}</td>
-        <td><div class="name-cell">${medal}<span class="tipster-hist-link" data-tipster="${escapeHtml(key)}" onclick="openTipsterHistory(this.dataset.tipster)" title="View full history for ${escapeHtml(key)}">${escapeHtml(key)}</span></div></td>
+        <td><div class="name-cell">${medal}${tipsterDashNameCell(key)}</div></td>
         ${betsCell}
         ${picksCell}
         ${wpctBetsCell}
@@ -5108,9 +5239,9 @@ function renderTipstersPage() {
         </td>
         <td>${s.bets}</td>
         <td>${betRec}${s.pending ? ` <span style="color:var(--gray-400);font-size:9.5px">(${s.pending} pend)</span>` : ''}</td>
-        <td>${betWr}</td>
+        <td>${betWr}${tipsterRankTag(name, 'bet')}</td>
         <td>${totalLegs > 0 ? `${s.legWins}W · ${s.legLosses}L` : '<span style="color:var(--gray-400)">—</span>'}</td>
-        <td>${wrCell}</td>
+        <td>${wrCell}${tipsterRankTag(name, 'pick')}</td>
         <td>${plCell}</td>
         <td>
           <div class="tipsters-actions">
@@ -5129,7 +5260,7 @@ function renderTipstersPage() {
     </div>
     <table class="tipsters-table">
       <thead><tr>
-        <th>Rank</th><th>Name</th><th>Web Page</th><th>Bets</th><th>W/L (bets)</th><th>Win % (bets)</th><th>W/L (legs)</th><th>Win % (legs)</th><th>Net P/L</th><th></th>
+        <th title="Rank by net P/L">Rank P/L</th><th>Name</th><th>Web Page</th><th>Bets</th><th>W/L (bets)</th><th title="Bet-level win % · rank among tipsters">Win % (bets) · #</th><th>W/L (picks)</th><th title="Pick-level win % (every parlay leg counts) · rank among tipsters">Win % (picks) · #</th><th>Net P/L</th><th></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>`
@@ -7261,13 +7392,19 @@ function getStagedView() {
   })
 }
 
-// ── TIPSTER PERF (2026-11-06) — P/L · rank · win % for every tipster ──────────
+// ── TIPSTER PERF v2 (2026-11-08) — P/L · 3 rankings · bet & pick win % ─────────
 // One shared source of truth used by every tab: feed cards (All Bets / Pending /
 // Live), Staged card headers, the Tipsters tab, the dashboard By-Tipster table,
 // the Daily Performance board and the tipster history modal.
-//   • Win % is BET-level: won bets / (won + lost bets). Voids & pending excluded.
-//   • Rank is by net P/L over settled money bets; tipsters with no settled money
-//     bets are unranked ("—"). rankedCount = size of the ranked pool.
+//   • Bet win %  = won bets / (won + lost bets). Voids & pending excluded.
+//   • Pick win % = counts INDIVIDUAL picks: a parlay with leg_results contributes
+//     one entry per leg (1 → win, 0 → loss, null ignored); singles and parlays
+//     without leg_results fall back to the bet-level result.
+//   • Three rankings over all tipsters:
+//       rank      → by net P/L (settled money bets only; tracking bets excluded)
+//       rankBet   → by bet win %  (tie-break: more decided bets, then P/L)
+//       rankPick  → by pick win % (tie-break: more decided picks, then P/L)
+//     Tipsters without data for a ranking are unranked ("—").
 // Results are cached for 1.5 s so rapid ✓/✗ clicks never recompute per card;
 // tipsterPerfInvalidate() is called whenever allBets changes.
 let _tipPerfCache = null, _tipPerfAt = 0
@@ -7279,9 +7416,15 @@ function tipsterPerfAll() {
   for (const b of allBets) {
     const n = (b.tipster || '').trim()
     if (!n) continue
-    const s = stats[n] || (stats[n] = { bets: 0, won: 0, lost: 0, voids: 0, pending: 0, settled: 0, stake: 0, pl: 0 })
+    const s = stats[n] || (stats[n] = { bets: 0, won: 0, lost: 0, voids: 0, pending: 0, settled: 0, stake: 0, pl: 0, legWon: 0, legLost: 0 })
     s.bets++
     const r = b.result
+    const isPar = typeof isParlayPick === 'function' && isParlayPick(b.pick)
+    const lr = Array.isArray(b.leg_results) ? b.leg_results : null
+    if (isPar && lr && lr.length > 0) {
+      lr.forEach(x => { if (x === 1 || x === 'won') s.legWon++; else if (x === 0 || x === 'lost') s.legLost++ })
+    } else if (r === 1 || r === 'won') s.legWon++
+    else if (r === 0 || r === 'lost') s.legLost++
     if (r === null || r === undefined) { s.pending++; continue }
     s.settled++
     if (r === 1 || r === 'won') s.won++
@@ -7289,23 +7432,51 @@ function tipsterPerfAll() {
     else s.voids++
     if (!isTrackingBet(b)) { s.stake += Number(b.stake_cop || 0); s.pl += Number(b.pl_cop || 0) }
   }
-  const ranked = Object.keys(stats).filter(n => stats[n].stake > 0).sort((a, b) => stats[b].pl - stats[a].pl || stats[b].won - stats[a].won)
-  const rank = {}
-  ranked.forEach((n, i) => { rank[n] = i + 1 })
-  _tipPerfCache = { stats, rank, rankedCount: ranked.length }
+  const names = Object.keys(stats)
+  const pct = (w, l) => (w + l) > 0 ? w / (w + l) : null
+  const rankedPL = names.filter(n => stats[n].stake > 0)
+    .sort((a, b) => stats[b].pl - stats[a].pl || stats[b].won - stats[a].won)
+  const rankedBet = names.filter(n => stats[n].won + stats[n].lost > 0)
+    .sort((a, b) => {
+      const sa = stats[a], sb = stats[b]
+      return pct(sb.won, sb.lost) - pct(sa.won, sa.lost) || (sb.won + sb.lost) - (sa.won + sa.lost) || sb.pl - sa.pl
+    })
+  const rankedPick = names.filter(n => stats[n].legWon + stats[n].legLost > 0)
+    .sort((a, b) => {
+      const sa = stats[a], sb = stats[b]
+      return pct(sb.legWon, sb.legLost) - pct(sa.legWon, sa.legLost) || (sb.legWon + sb.legLost) - (sa.legWon + sa.legLost) || sb.pl - sa.pl
+    })
+  const rank = {}, rankBet = {}, rankPick = {}
+  rankedPL.forEach((n, i) => { rank[n] = i + 1 })
+  rankedBet.forEach((n, i) => { rankBet[n] = i + 1 })
+  rankedPick.forEach((n, i) => { rankPick[n] = i + 1 })
+  _tipPerfCache = { stats, rank, rankBet, rankPick, rankedCount: rankedPL.length, rankedBetCount: rankedBet.length, rankedPickCount: rankedPick.length }
   _tipPerfAt = now
   return _tipPerfCache
 }
 function tipsterPerfFor(name) {
   const n = (name || '').trim()
   if (!n) return null
-  const { stats, rank, rankedCount } = tipsterPerfAll()
-  const s = stats[n]
+  const c = tipsterPerfAll()
+  const s = c.stats[n]
   if (!s) return null
-  const dec = s.won + s.lost
-  return Object.assign({ name: n, rank: rank[n] || null, rankedCount, decided: dec, winPct: dec > 0 ? Math.round(s.won / dec * 100) : null }, s)
+  const dec = s.won + s.lost, legDec = s.legWon + s.legLost
+  return Object.assign({
+    name: n,
+    rank: c.rank[n] || null, rankedCount: c.rankedCount,
+    rankBet: c.rankBet[n] || null, rankedBetCount: c.rankedBetCount,
+    rankPick: c.rankPick[n] || null, rankedPickCount: c.rankedPickCount,
+    decided: dec, winPct: dec > 0 ? Math.round(s.won / dec * 100) : null,
+    legDecided: legDec, pickPct: legDec > 0 ? Math.round(s.legWon / legDec * 100) : null,
+  }, s)
 }
-// Full chip: [P/L +$x] [Rank #3/25] [Win 62% · 45W-28L · 80 bets]
+// Small "#3/25" fragment (or "—") for a given ranking: 'pl' | 'bet' | 'pick'
+function tipsterRankFrag(p, kind) {
+  const r = kind === 'bet' ? p.rankBet : kind === 'pick' ? p.rankPick : p.rank
+  const N = kind === 'bet' ? p.rankedBetCount : kind === 'pick' ? p.rankedPickCount : p.rankedCount
+  return r ? `<span class="rk">#${r}<span class="muted">/${N}</span></span>` : `<span class="rk none">—</span>`
+}
+// Full chip: [P/L +$x #3/25] [Bets 62% #5/25 · 45W-28L] [Picks 58% #7/25 · 90W-65L]
 function tipsterStatsChip(name, id) {
   const n = (name || '').trim()
   const wrapId = `staged-tipster-stats-${id}`
@@ -7315,30 +7486,51 @@ function tipsterStatsChip(name, id) {
     return `<span class="staged-tipster-stats" id="${wrapId}" title="No bets recorded yet for ${escapeHtml(n)}"><span class="muted">no history</span></span>`
   }
   const plHtml = p.stake > 0
-    ? `<span><span class="lbl">P/L</span><b class="${p.pl >= 0 ? 'pos' : 'neg'}">${p.pl >= 0 ? '+' : ''}${COP(p.pl)}</b></span>`
-    : `<span><span class="lbl">P/L</span><span class="muted">—</span></span>`
-  const rankHtml = p.rank
-    ? `<span><span class="lbl">Rank</span><b class="rank">#${p.rank}</b><span class="muted">/${p.rankedCount}</span></span>`
-    : `<span><span class="lbl">Rank</span><span class="muted">—</span></span>`
-  const wrHtml = p.winPct !== null
-    ? `<span><span class="lbl">Win</span><b>${p.winPct}%</b><span class="muted">&nbsp;· ${p.won}W-${p.lost}L · ${p.bets} bets</span></span>`
-    : `<span><span class="lbl">Win</span><span class="muted">— · ${p.bets} bets</span></span>`
-  const title = `${n}: ${p.bets} bets (${p.settled} settled, ${p.pending} pending${p.voids ? ', ' + p.voids + ' void' : ''}) · ${p.won}W-${p.lost}L · net P/L ${COP(p.pl)}` + (p.rank ? ` · rank #${p.rank} of ${p.rankedCount} by P/L` : '')
-  return `<span class="staged-tipster-stats" id="${wrapId}" title="${escapeHtml(title)}">${plHtml}${rankHtml}${wrHtml}</span>`
+    ? `<span title="Net P/L · rank by P/L"><span class="lbl">P/L</span><b class="${p.pl >= 0 ? 'pos' : 'neg'}">${p.pl >= 0 ? '+' : ''}${COP(p.pl)}</b>${tipsterRankFrag(p, 'pl')}</span>`
+    : `<span title="No settled money bets"><span class="lbl">P/L</span><span class="muted">—</span></span>`
+  const betHtml = p.winPct !== null
+    ? `<span title="Win % by BET (parlay counts once) · rank by bet win %"><span class="lbl">Bets</span><b>${p.winPct}%</b>${tipsterRankFrag(p, 'bet')}<span class="muted">&nbsp;· ${p.won}W-${p.lost}L</span></span>`
+    : `<span title="No decided bets yet"><span class="lbl">Bets</span><span class="muted">— · ${p.bets} bets</span></span>`
+  const pickHtml = p.pickPct !== null
+    ? `<span title="Win % by PICK (every parlay leg counts) · rank by pick win %"><span class="lbl">Picks</span><b>${p.pickPct}%</b>${tipsterRankFrag(p, 'pick')}<span class="muted">&nbsp;· ${p.legWon}W-${p.legLost}L</span></span>`
+    : `<span title="No decided picks yet"><span class="lbl">Picks</span><span class="muted">—</span></span>`
+  const title = `${n}: ${p.bets} bets (${p.settled} settled, ${p.pending} pending${p.voids ? ', ' + p.voids + ' void' : ''}) · bets ${p.won}W-${p.lost}L · picks ${p.legWon}W-${p.legLost}L · net P/L ${COP(p.pl)}`
+    + (p.rank ? ` · #${p.rank}/${p.rankedCount} by P/L` : '')
+    + (p.rankBet ? ` · #${p.rankBet}/${p.rankedBetCount} by bet win %` : '')
+    + (p.rankPick ? ` · #${p.rankPick}/${p.rankedPickCount} by pick win %` : '')
+  return `<span class="staged-tipster-stats" id="${wrapId}" title="${escapeHtml(title)}">${plHtml}${betHtml}${pickHtml}</span>`
 }
-// Compact badge: "#3/25 · 62%" (or "— · 62%" when unranked). Sits beside a tipster pill.
+// Compact badge: "#3 · B62% #5 · P58% #7" — sits beside a tipster pill in dashboard / live / tables.
 function tipsterRankBadge(name) {
   const p = tipsterPerfFor(name)
   if (!p || p.bets === 0) return ''
-  const r = p.rank ? `<span class="r">#${p.rank}</span><span class="muted">/${p.rankedCount}</span>` : `<span class="muted">—</span>`
-  const w = p.winPct !== null ? `<span class="w">${p.winPct}%</span>` : `<span class="muted">—%</span>`
-  const title = `${p.name}: ${p.won}W-${p.lost}L (${p.winPct === null ? '—' : p.winPct + '%'}) · ${p.bets} bets · P/L ${COP(p.pl)}` + (p.rank ? ` · rank #${p.rank}/${p.rankedCount}` : ' · unranked (no settled money bets)')
-  return `<span class="tip-rank-badge${p.rank ? '' : ' none'}" title="${escapeHtml(title)}">${r} · ${w}</span>`
+  const r = p.rank ? `<span class="r" title="Rank by P/L">#${p.rank}</span>` : `<span class="muted" title="Unranked by P/L">—</span>`
+  const b = p.winPct !== null
+    ? `<span class="w" title="Bet win % · rank">B${p.winPct}%${p.rankBet ? ` <span class="r">#${p.rankBet}</span>` : ''}</span>`
+    : `<span class="muted">B—</span>`
+  const k = p.pickPct !== null
+    ? `<span class="w" title="Pick win % (parlay legs count) · rank">P${p.pickPct}%${p.rankPick ? ` <span class="r">#${p.rankPick}</span>` : ''}</span>`
+    : `<span class="muted">P—</span>`
+  const title = `${p.name}: P/L ${COP(p.pl)}${p.rank ? ` (#${p.rank}/${p.rankedCount})` : ' (unranked)'} · bets ${p.won}W-${p.lost}L ${p.winPct === null ? '—' : p.winPct + '%'}${p.rankBet ? ` (#${p.rankBet}/${p.rankedBetCount})` : ''} · picks ${p.legWon}W-${p.legLost}L ${p.pickPct === null ? '—' : p.pickPct + '%'}${p.rankPick ? ` (#${p.rankPick}/${p.rankedPickCount})` : ''} · ${p.bets} bets`
+  return `<span class="tip-rank-badge${p.rank ? '' : ' none'}" title="${escapeHtml(title)}">${r} · ${b} · ${k}</span>`
 }
-// Table cell for Tipsters tab / dashboard: "#3" or "—"
-function tipsterRankCell(name) {
+// Table cell for Tipsters tab / dashboard: "#3" or "—". kind = 'pl' (default) | 'bet' | 'pick'
+function tipsterRankCell(name, kind = 'pl') {
   const p = tipsterPerfFor(name)
-  return p && p.rank ? `<span class="tip-rank-cell" title="Rank by net P/L (${p.rank} of ${p.rankedCount})">#${p.rank}</span>` : `<span class="tip-rank-cell none" title="Unranked — no settled money bets">—</span>`
+  const label = kind === 'bet' ? 'bet win %' : kind === 'pick' ? 'pick win %' : 'net P/L'
+  if (!p) return `<span class="tip-rank-cell none" title="Unranked">—</span>`
+  const r = kind === 'bet' ? p.rankBet : kind === 'pick' ? p.rankPick : p.rank
+  const N = kind === 'bet' ? p.rankedBetCount : kind === 'pick' ? p.rankedPickCount : p.rankedCount
+  return r ? `<span class="tip-rank-cell" title="Rank by ${label} (${r} of ${N})">#${r}</span>` : `<span class="tip-rank-cell none" title="Unranked by ${label}">—</span>`
+}
+// Inline "#5/25" tag to append after a win-% value in tables
+function tipsterRankTag(name, kind) {
+  const p = tipsterPerfFor(name)
+  if (!p) return ''
+  const r = kind === 'bet' ? p.rankBet : kind === 'pick' ? p.rankPick : p.rank
+  const N = kind === 'bet' ? p.rankedBetCount : kind === 'pick' ? p.rankedPickCount : p.rankedCount
+  const label = kind === 'bet' ? 'bet win %' : kind === 'pick' ? 'pick win %' : 'net P/L'
+  return r ? `<span class="tip-rank-tag" title="Rank by ${label} (${r} of ${N})">#${r}<span class="muted">/${N}</span></span>` : ''
 }
 // Football-parity aliases
 const stagedTipsterStatsChip = tipsterStatsChip
