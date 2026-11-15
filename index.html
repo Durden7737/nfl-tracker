@@ -2384,7 +2384,35 @@ const DEFAULT_TIPSTER_LINKS = {
 }
 const TIPSTER_SEED_FLAG = 'nfl_tipster_seed_v1'
 const UNIT_COP = 5000
-const BOOKMAKERS = ['RushBet', 'Bwin', 'Betsson', 'Betano']
+const BOOKMAKERS = ['RushBet', 'Bwin', 'Betsson', 'Betano', 'DraftKings', 'FanDuel', 'BetMGM', 'Caesars']
+// ── PARSE AUTOFILL (2026-11-15) ─ bookmaker / units / competition helpers ──
+// "Rushbet" / "rush bet" / "BETANO" → the exact BOOKMAKERS option; short forms too.
+const BOOKMAKER_ALIASES = {
+  rushbet: 'RushBet', bwin: 'Bwin', betsson: 'Betsson', betano: 'Betano',
+  draftkings: 'DraftKings', dk: 'DraftKings', dkng: 'DraftKings',
+  fanduel: 'FanDuel', fd: 'FanDuel',
+  betmgm: 'BetMGM', mgm: 'BetMGM',
+  caesars: 'Caesars', caesar: 'Caesars', czr: 'Caesars', czrs: 'Caesars',
+}
+function matchBookmaker(raw) {
+  const k = String(raw || '').toLowerCase().normalize('NFD').replace(/[^a-z0-9]+/g, '')
+  if (!k) return null
+  const tryKey = key => BOOKMAKER_ALIASES[key] || BOOKMAKERS.find(b => b.toLowerCase().replace(/[^a-z0-9]+/g, '') === key) || null
+  return tryKey(k) || tryKey(k.replace(/(sportsbook|colombia|co)$/, '')) || null
+}
+// One or two books ("Rushbet + Betano") → "RushBet + Betano"; null if any part is unknown.
+function matchBookmakerList(raw) {
+  const parts = String(raw || '').split(/\s*(?:\+|&|\/|,)\s*/).map(x => x.trim()).filter(Boolean)
+  if (!parts.length || parts.length > 2) return null
+  const mapped = parts.map(matchBookmaker)
+  if (mapped.some(m => !m)) return null
+  return [...new Set(mapped)].join(' + ')
+}
+const DEFAULT_COMPETITION = 'NFL Regular Season'
+function unitsFromCop(cop) {
+  const n = Number(cop)
+  return Number.isFinite(n) && n > 0 ? Math.round(n / UNIT_COP * 10000) / 10000 : null
+}
 
 // ── IMPORT SETTINGS (AI fallback model, FX rates, caches) ─────────
 // Text fallback defaults to Haiku (cheap, fast, no web search). Screenshots
@@ -2734,7 +2762,7 @@ function extractedToStagedPayload(b, source) {
     units:            isTracking ? null : units,
     stake_amount:     b.stake_amount != null ? Number(b.stake_amount) : null,
     stake_currency:   b.stake_currency || null,
-    bookmaker:        null,
+    bookmaker:        (b.bookmaker && matchBookmakerList(b.bookmaker)) || null,
     date_placed:      todayLocalISO(),
     notes:            b.notes || null,
     tracking_only:    !!isTracking,
@@ -3111,9 +3139,9 @@ window.syncMatchToParts = function() {
   const h = document.getElementById('f-match-home')
   const a = document.getElementById('f-match-away')
   if (!m || !h || !a) return
-  const parts = String(m.value || '').split(/\s+vs\.?\s+/i)
-  h.value = (parts[0] || '').trim()
-  a.value = (parts[1] || '').trim()
+  const parts = splitMatchName(m.value)
+  h.value = parts.home
+  a.value = parts.away
 }
 window.quickFillTeam = function(id, sel) {
   if (!sel.value) return
@@ -6099,6 +6127,8 @@ function parseStakeString(raw) {
     const fx = loadFxRates()
     if (Number(fx[code]) > 0) out.stake_cop = Math.round(amount * Number(fx[code]))
   }
+  // COP stake (or a currency with an FX rate set) → units at 1U = UNIT_COP
+  if (out.stake_cop != null) out.units = unitsFromCop(out.stake_cop)
   return out
 }
 
@@ -6333,8 +6363,28 @@ const LEG_LINE_RE = /^\s*(?:[-•*▪●]|\d{1,2}[.)])\s+(.*)$/
 const LEG_META_KEYS = { 'partido leg': 'match', 'match leg': 'match', 'leg partido': 'match', 'leg match': 'match', 'liga leg': 'competition', 'league leg': 'competition', 'leg liga': 'competition', 'competicion leg': 'competition', 'competition leg': 'competition' }
 
 function parseLegLine(text) {
-  const { pick, odds } = splitLegOdds(text)
-  return { pick: pick, odds: odds, match: null, competition: null }
+  // "(Betano)" / "[DK]" after the pick → bookmaker, removed from the pick text
+  let bookmaker = null
+  const s = String(text || '').replace(/\s*[\(\[]\s*([A-Za-z][A-Za-z0-9 .&+\/]{1,30}?)\s*[\)\]]/g, (m, inner) => {
+    const bk = matchBookmakerList(inner)
+    if (bk && !bookmaker) { bookmaker = bk; return '' }
+    return m
+  }).trim()
+  const { pick, odds } = splitLegOdds(s)
+  return { pick: pick, odds: odds, match: null, competition: null, bookmaker }
+}
+function applyDefaultCompetition(bet) {
+  if (!bet || bet.competition) return bet
+  const legs = Array.isArray(bet.legs) ? bet.legs : []
+  if (legs.some(l => l && (l.competition || l.tournament))) return bet   // the text named a league
+  bet.competition = DEFAULT_COMPETITION
+  const info = lookupCompetitionLocal(DEFAULT_COMPETITION)
+  if (info) {
+    bet.competition = info.competition
+    if (!bet.region)           bet.region = info.region
+    if (!bet.competition_type) bet.competition_type = info.competition_type
+  }
+  return bet
 }
 
 function parseStructuredBlock(block, opts = {}) {
@@ -6349,6 +6399,8 @@ function parseStructuredBlock(block, opts = {}) {
   for (const rl of String(block).split(/\r?\n/)) {
     let l = rl.replace(/\*\*|__|`/g, '').replace(/\s+$/, '')
     if (!l.trim()) continue
+    if (/^\s*END BET\s*$/i.test(l)) continue
+    l = l.replace(/^(\s*stake\s*\(\s*cop\s*\))\s+(?=\d)/i, '$1: ')   // "Stake (COP) 1250" → "Stake (COP): 1250"
     const legStart = LEG_LINE_RE.test(l)
     if (!legStart) l = l.replace(/^[^\p{L}\p{N}]+/u, m => /^\s+$/.test(m) ? m : '')   // drop leading emoji/punct, keep indentation
     const pairs = l.split(/\s+[|·]\s+/)
@@ -6393,7 +6445,10 @@ function parseStructuredBlock(block, opts = {}) {
   const tipo    = (kv['tipo apuesta'] || kv['tipo de apuesta'] || kv['tipo'] || kv['type'] || kv['bet type'] || '').toLowerCase()
   const isPar   = legs.length >= 2 || /parlay|combinada|combo|acca|accumulator|m[uú]ltiple|multiple/.test(tipo)
   const topOdds = parseOddsToken(kv['odds'] || kv['cuota'] || kv['cuotas'] || kv['total odds'] || kv['cuota total'])
-  const stake   = parseStakeString(kv['stake'] || kv['monto'] || kv['apostado'] || kv['importe'])
+  const stake   = parseStakeString(kv['stake'] || kv['stake cop'] || kv['monto'] || kv['apostado'] || kv['importe'])
+  const bkRaw   = (kv['bookmaker'] || kv['bookmakers'] || kv['casa'] || kv['casa de apuestas'] || kv['book'] || kv['sportsbook'] || '').trim()
+  const bkLine  = bkRaw ? matchBookmakerList(bkRaw) : null
+  const bookmaker = bkLine || legs.map(l => l.bookmaker).find(Boolean) || null
   const result  = parseResultToken(kv['resultado'] || kv['result'])
   const partido = normMatchName(kv['partido'] || kv['match'] || kv['evento'] || kv['event'] || '')
   const league  = kv['liga'] || kv['league'] || kv['competition'] || kv['competicion'] || kv['torneo'] || null
@@ -6409,8 +6464,13 @@ function parseStructuredBlock(block, opts = {}) {
   // Match label
   let match = partido && !/multi[\s-]?game|multi[\s-]?partido|varios/i.test(partido) ? partido : ''
   if (!match && legs.length === 1 && legs[0].match) match = legs[0].match
+  // Same-game parlay: every leg names the same game → that game fills Home/Away
   if (!match && isPar) {
-    const names = legs.map(l => (l.match || l.pick || '').split(/\s+vs\s+/i)[0].trim()).filter(Boolean)
+    const lm = legs.map(l => l.match).filter(Boolean)
+    if (lm.length === legs.length && new Set(lm.map(normKey)).size === 1) match = lm[0]
+  }
+  if (!match && isPar) {
+    const names = legs.map(l => (l.match || l.pick || '').split(/\s+(?:vs|@)\s+/i)[0].trim()).filter(Boolean)
     const shown = names.slice(0, 3).join(' + ')
     match = `Parlay: ${shown}${names.length > 3 ? ` +${names.length - 3}` : ''}`
   }
@@ -6428,6 +6488,7 @@ function parseStructuredBlock(block, opts = {}) {
   const notesParts = []
   if (stake.raw)     notesParts.push(`Stake: ${stake.raw}`)
   if (globalBet)     notesParts.push(`Global Bet: ${globalBet}`)
+  if (bkRaw && !bkLine) notesParts.push(`Bookmaker: ${bkRaw}`)   // unknown book → keep the raw text
   if (result === 'void') notesParts.push('Resultado: Nula')
   if (kv['notas'] || kv['notes']) notesParts.push(kv['notas'] || kv['notes'])
 
@@ -6451,6 +6512,7 @@ function parseStructuredBlock(block, opts = {}) {
     matchday:         matchdayFromText(weekHint) || null,
     matchday_hint:    weekHint || league || null,
     tipster:          tipster,
+    bookmaker:        bookmaker,
     legs:             isPar ? legs.map(l => ({ pick: l.pick, odds: l.odds, match: l.match, competition: l.competition })) : null,
     notes:            notesParts.join(' · ') || null,
     date:             date,
@@ -6462,8 +6524,30 @@ function parseStructuredBlock(block, opts = {}) {
     _raw:             String(block),
   }
   fillCompetitionLocal(bet)
-  if (opts.trackingOnly) { bet.bet_type = TRACKING_TYPE; bet.stake = null; bet.stake_cop = null }
+  applyDefaultCompetition(bet)
+  if (opts.trackingOnly) { bet.bet_type = TRACKING_TYPE; bet.stake = null; bet.stake_cop = null; bet.units = null }
   return { ok: errors.length === 0, bet, errors }
+}
+
+// Where each bet block starts. "Batch Bet: i of N" first; then the
+// "BET n OF m … END BET" layout; then cards that only carry "Global Bet: x of y";
+// finally a single card with no counter line at all (Tipster/Partido + Apuesta).
+function findBlockStarts(src) {
+  const MD = '[*_`\\s]*'
+  const res = [
+    new RegExp('^' + MD + '(?:\\d+[.)]\\s*)?Batch Bet:' + MD + '\\d+\\s+of\\s+\\d+', 'gmi'),
+    new RegExp('^' + MD + 'BET\\s+\\d+\\s+OF\\s+\\d+' + MD + '$', 'gmi'),
+    new RegExp('^' + MD + '(?:\\d+[.)]\\s*)?Global Bet:' + MD + '\\d+\\s+of\\s+\\d+', 'gmi'),
+  ]
+  for (const re of res) {
+    const starts = []
+    let m
+    while ((m = re.exec(src))) starts.push(m.index)
+    if (starts.length) return starts
+  }
+  const pickKeys = (src.match(new RegExp('^' + MD + '(?:apuestas?|bets?|picks?|selecci[oó]n(?:es)?)' + MD + ':', 'gmi')) || []).length
+  const headKeys = new RegExp('^' + MD + '(?:tipster|date|fecha|partido|match)' + MD + ':', 'mi').test(src)
+  return pickKeys === 1 && headKeys ? [0] : []
 }
 
 // Parse a whole paste. Returns:
@@ -6472,10 +6556,7 @@ function parseStructuredBetText(text, opts = {}) {
   const src = String(text || '').replace(/ /g, ' ')
   const totalM = src.match(TOTAL_BETS_RE)
   const total = totalM ? Number(totalM[1]) : null
-  const starts = []
-  const re = /^\s*(?:\d+[.)]\s*)?Batch Bet:\s*\d+\s+of\s+\d+/gmi
-  let m
-  while ((m = re.exec(src))) starts.push(m.index)
+  const starts = findBlockStarts(src)
   if (!starts.length) return { detected: false, bets: [], failed: [], total, blockCount: 0, countMismatch: false }
   const blocks = starts.map((s, i) => src.slice(s, i + 1 < starts.length ? starts[i + 1] : undefined).trim())
   // Pass 1: strict. Pass 2: blocks that only lack tipster/date borrow them
@@ -6714,6 +6795,7 @@ function normalizeAiBet(raw, { trackingOnly, source }) {
       stake = { raw: String(b.stake), units: null, stake_amount: Number(b.stake), stake_currency: 'COP', stake_cop: Math.round(Number(b.stake)) }
     }
   }
+  if (stake.units == null && stake.stake_cop != null) stake.units = unitsFromCop(stake.stake_cop)
   b.units = stake.units; b.stake_amount = stake.stake_amount; b.stake_currency = stake.stake_currency
   b.stake_raw = stake.raw; b.stake_cop = stake.stake_cop; b.stake = stake.stake_cop
   if (b.legs) { b.bet_type = 'Parlay'; if (!b.pick || !/parlay/i.test(b.pick)) b.pick = `Parlay — ${b.legs.length} legs` }
@@ -6721,6 +6803,12 @@ function normalizeAiBet(raw, { trackingOnly, source }) {
   if (b.bet_type === TRACKING_TYPE && !trackingOnly) b.bet_type = b.legs ? 'Parlay' : mapMarketToBetType(b.pick)
   if (trackingOnly) { b.bet_type = TRACKING_TYPE; b.stake = null; b.stake_cop = null }
   fillCompetitionLocal(b)
+  applyDefaultCompetition(b)
+  if (b.bookmaker) {
+    const bk = matchBookmakerList(b.bookmaker)
+    if (!bk) b.notes = [b.notes, `Bookmaker: ${b.bookmaker}`].filter(Boolean).join(' · ')
+    b.bookmaker = bk
+  }
   return b
 }
 
@@ -8041,6 +8129,11 @@ window.updateStagedField = function(id, field, rawVal) {
 function splitMatchName(name) {
   const s = String(name || '').trim()
   if (!s) return { home: '', away: '' }
+  // PARSE AUTOFILL (2026-11-15): multi-game labels fill neither box;
+  // "Away @ Home" (NFL convention) → text before "@" is AWAY, after it HOME.
+  if (/^parlay\s*:/i.test(s) || /^multi[\s-]?(game|partido)/i.test(s)) return { home: '', away: '' }
+  const at = s.split(/\s+@\s+/)
+  if (at.length === 2 && at[0].trim() && at[1].trim()) return { home: at[1].trim(), away: at[0].trim() }
   const parts = s.split(/\s+vs?\.?\s+/i)
   return { home: (parts[0] || '').trim(), away: (parts.slice(1).join(' vs ') || '').trim() }
 }
