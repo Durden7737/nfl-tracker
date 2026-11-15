@@ -2384,7 +2384,7 @@ const DEFAULT_TIPSTER_LINKS = {
 }
 const TIPSTER_SEED_FLAG = 'nfl_tipster_seed_v1'
 const UNIT_COP = 5000
-const BOOKMAKERS = ['RushBet', 'Bwin', 'Betsson', 'Betano', 'DraftKings', 'FanDuel', 'BetMGM', 'Caesars']
+const BOOKMAKERS = ['RushBet', 'Bwin', 'Betsson', 'Betano']
 // ── PARSE AUTOFILL (2026-11-15) ─ bookmaker / units / competition helpers ──
 // "Rushbet" / "rush bet" / "BETANO" → the exact BOOKMAKERS option; short forms too.
 const BOOKMAKER_ALIASES = {
@@ -2397,7 +2397,8 @@ const BOOKMAKER_ALIASES = {
 function matchBookmaker(raw) {
   const k = String(raw || '').toLowerCase().normalize('NFD').replace(/[^a-z0-9]+/g, '')
   if (!k) return null
-  const tryKey = key => BOOKMAKER_ALIASES[key] || BOOKMAKERS.find(b => b.toLowerCase().replace(/[^a-z0-9]+/g, '') === key) || null
+  // Only names that exist in the BOOKMAKERS dropdown count as a match (DK/FD/MGM/CZR stay as raw text in Notes).
+  const tryKey = key => { const v = BOOKMAKER_ALIASES[key] || BOOKMAKERS.find(b => b.toLowerCase().replace(/[^a-z0-9]+/g, '') === key) || null; return v && BOOKMAKERS.includes(v) ? v : null }
   return tryKey(k) || tryKey(k.replace(/(sportsbook|colombia|co)$/, '')) || null
 }
 // One or two books ("Rushbet + Betano") → "RushBet + Betano"; null if any part is unknown.
