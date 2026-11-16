@@ -2684,14 +2684,25 @@ function regionClass(region) {
 // ── PERSISTENCE (Supabase, with localStorage fallback if not configured) ──
 // Reads come from the `nfl_bets_with_calc` view which returns
 // potential_cop + pl_cop as computed columns. Writes go to `nfl_bets`.
+// LOAD ALL ROWS (2026-11-16): Supabase returns at most 1000 rows per request, so the
+// table is read page by page — otherwise only the newest 1000 bets were loaded and
+// every total, ranking and the Excel backup silently ignored the older ones.
 async function loadBets() {
-  const { data, error } = await supabase
-    .from('nfl_bets_with_calc')
-    .select('*')
-    .order('date', { ascending: false })
-    .order('id',   { ascending: false })
-  if (error) { toast('Failed to load bets: ' + error.message, 'error'); return }
-  allBets = data || []
+  const PAGE = 1000, rows = [], seen = new Set()
+  for (let from = 0; from < 200000; from += PAGE) {
+    let q = supabase
+      .from('nfl_bets_with_calc')
+      .select('*')
+      .order('date', { ascending: false })
+      .order('id',   { ascending: false })
+    const paged = typeof q.range === 'function'      // the local-only shim has no paging
+    if (paged) q = q.range(from, from + PAGE - 1)
+    const { data, error } = await q
+    if (error) { toast('Failed to load bets: ' + error.message, 'error'); return }
+    for (const r of (data || [])) { if (!seen.has(r.id)) { seen.add(r.id); rows.push(r) } }
+    if (!paged || !data || data.length < PAGE) break
+  }
+  allBets = rows
   tipsterPerfInvalidate()
 }
 async function insertBet(payload) {
