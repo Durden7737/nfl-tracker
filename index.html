@@ -2027,6 +2027,27 @@
     html, body { overscroll-behavior-y: none; }
   }
 
+  /* ═══ TIPSTER ARCHIVE (2026-11-16) ═══ */
+  .arch-tag { display:inline-block; margin-left:5px; padding:1px 6px; border-radius:999px; font-size:9.5px; font-weight:700;
+    letter-spacing:.03em; background:rgba(255,179,64,.16); color:#FFB340; border:1px solid rgba(255,179,64,.35); vertical-align:middle; white-space:nowrap; }
+  .arch-tag.active { background:rgba(48,209,88,.14); color:#30D158; border-color:rgba(48,209,88,.35); }
+  .arch-note { font-size:11px; color:var(--gray-400); margin:-4px 0 14px; font-family:var(--font-mono); }
+  .arch-note a, .arch-link { color:var(--blue); text-decoration:underline; cursor:pointer; }
+  .arch-toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:14px; font-size:12px; }
+  .arch-toolbar label { display:inline-flex; gap:6px; align-items:center; cursor:pointer; color:var(--gray-600); }
+  .arch-table-wrap { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .arch-table th.sortable { cursor:pointer; user-select:none; white-space:nowrap; }
+  .arch-table th.sortable:hover { color:var(--blue); }
+  .arch-table td { white-space:nowrap; }
+  .arch-table tr.is-active td { opacity:.82; }
+  .btn-unarchive { border:1px solid rgba(48,209,88,.4); background:rgba(48,209,88,.12); color:#30D158; border-radius:7px;
+    padding:3px 9px; font-size:11px; font-weight:600; cursor:pointer; white-space:nowrap; }
+  .btn-archive { border:1px solid rgba(255,179,64,.4); background:rgba(255,179,64,.10); color:#FFB340; border-radius:7px;
+    padding:3px 7px; font-size:11px; cursor:pointer; }
+  .th-archived-note { background:rgba(255,179,64,.12); border:1px solid rgba(255,179,64,.35); border-radius:9px; padding:9px 12px;
+    font-size:11.5px; color:#FFB340; margin-bottom:12px; }
+  .feed-readonly { font-size:10px; color:var(--gray-400); font-family:var(--font-mono); }
+
   /* ═══ DASHBOARD TIPSTER LINKS (2026-11-08) ═══ */
   .breakdown-table a.tipster-url { color: inherit; text-decoration: none; }
   .breakdown-table a.tipster-url:hover { color: var(--blue); border-bottom-color: var(--blue); }
@@ -2054,6 +2075,7 @@
     <button class="nav-link" onclick="showPage('pending')"   id="nav-pending">Pending <span id="nav-pending-count" class="nav-badge" style="display:none">0</span></button>
     <button class="nav-link" onclick="showPage('live')"      id="nav-live"><span class="nav-link-icon">🛰</span>Live</button>
     <button class="nav-link" onclick="showPage('tipsters')"  id="nav-tipsters"><span class="nav-link-icon">⭐</span>Tipsters</button>
+    <button class="nav-link" onclick="showPage('archived')"  id="nav-archived" title="Archived tipsters"><span class="nav-link-icon">📦</span>Archived</button>
     <button class="nav-link" onclick="showPage('import')"    id="nav-import"><span class="nav-link-icon">☄</span>Import</button>
     <button class="nav-link" onclick="showPage('staged')"    id="nav-staged">📋 Staged <span id="nav-staged-count" class="nav-badge" style="display:none">0</span></button>
   </div>
@@ -2095,6 +2117,7 @@
   <div class="m-sheet" onclick="event.stopPropagation()">
     <div class="m-sheet-handle"></div>
     <button class="m-sheet-item" onclick="closeMoreSheet(); showPage('tipsters')"><span class="m-ico">⭐</span>Tipsters</button>
+    <button class="m-sheet-item" onclick="closeMoreSheet(); showPage('archived')"><span class="m-ico">📦</span>Archived tipsters</button>
     <button class="m-sheet-item" onclick="closeMoreSheet(); showPage('import')"><span class="m-ico">☄</span>Import <span class="m-sub">image · text</span></button>
     <button class="m-sheet-item" onclick="closeMoreSheet(); exportBackupXLSX()"><span class="m-ico">📥</span>Export backup <span class="m-sub">.xlsx</span></button>
     <button class="m-sheet-item" onclick="refreshFromCloud(false)"><span class="m-ico">🔄</span>Sync now <span class="m-sub" id="m-sync-sub"></span></button>
@@ -2463,6 +2486,7 @@ let settlingBetId = null
 let pendingLegResults = []    // in-progress per-leg [1/0/null] while settle modal is open
 let editingBetId = null
 let filterRegion = '', filterResult = '', filterCompType = '', filterTipster = '', searchTerm = ''
+let filterShowArchived = false   // TIPSTER ARCHIVE: All Bets hides archived tipsters unless ticked
 let betsSortKey = '', betsSortDir = 1  // All Bets table sort: key + direction (1 asc, -1 desc)
 // Pending-page filters: free-text search + match chip filter
 let pendingSearch = ''
@@ -2525,7 +2549,7 @@ function tipsterColor(name) {
 function tipsterPill(name) {
   if (!name) return `<span style="color:var(--gray-400)">—</span>`
   const c = tipsterColor(name)
-  return `<span class="tipster-pill" data-tipster="${escapeHtml(name)}" onclick="openTipsterHistory(this.dataset.tipster)" title="View full history for ${escapeHtml(name)}" style="background:${c.bg};color:${c.fg};border-color:${c.border};">${escapeHtml(name)}</span>`
+  return `<span class="tipster-pill" data-tipster="${escapeHtml(name)}" onclick="openTipsterHistory(this.dataset.tipster)" title="View full history for ${escapeHtml(name)}" style="background:${c.bg};color:${c.fg};border-color:${c.border};">${escapeHtml(name)}</span>${isArchivedTipster(name) ? '<span class="arch-tag" title="Archived tipster — hidden from the dashboard, rankings and filters">📦 archived</span>' : ''}`
 }
 
 // ── TIPSTER HISTORY MODAL ─────────────────────────────────────────
@@ -2535,8 +2559,10 @@ function tipsterPill(name) {
 // hunt down and fix via the edit button.
 window.openTipsterHistory = function(name) {
   if (!name) name = 'Unknown'
+  const _arch = isArchivedTipster(name)   // TIPSTER ARCHIVE: archived → read-only history
+  const _archKey = normTip(name)
   const bets = allBets
-    .filter(b => (b.tipster || 'Unknown') === name)
+    .filter(b => _arch ? normTip(b.tipster) === _archKey : (b.tipster || 'Unknown') === name)
     .slice()
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')) || (b.id || 0) - (a.id || 0))
   const settled = bets.filter(b => b.result !== null)
@@ -2555,9 +2581,12 @@ window.openTipsterHistory = function(name) {
     ? `<div style="background:#fef9c3; border:1px solid #fde047; border-radius:9px; padding:9px 12px; font-size:11.5px; color:#713f12; margin-bottom:12px;">
          These bets have <strong>no tipster assigned</strong>. Use the ✏️ edit button on a bet to set the right tipster.</div>`
     : ''
+  const archNote = _arch
+    ? `<div class="th-archived-note">📦 <strong>Archived tipster</strong>${archivedAtFor(name) ? ' since ' + fmtArchDate(archivedAtFor(name)) : ''} — read-only history. Every bet is kept; unarchive from the <span class="arch-link" onclick="closeTipsterHistory(); showPage('archived')">Archived</span> tab to edit or settle.</div>`
+    : ''
   const bodyEl = document.getElementById('th-body')
   if (bodyEl) bodyEl.innerHTML = `
-    ${unknownNote}
+    ${unknownNote}${archNote}
     <div class="th-stats">
       <div class="th-stat"><span class="th-stat-label">Rank P/L</span><span class="th-stat-value">${(() => { const p = tipsterPerfFor(name); return p && p.rank ? `#${p.rank}<span style="font-size:11px;opacity:.6">/${p.rankedCount}</span>` : '—' })()}</span></div>
       <div class="th-stat"><span class="th-stat-label">Rank bets W%</span><span class="th-stat-value">${(() => { const p = tipsterPerfFor(name); return p && p.rankBet ? `#${p.rankBet}<span style="font-size:11px;opacity:.6">/${p.rankedBetCount}</span>` : '—' })()}</span></div>
@@ -2568,7 +2597,7 @@ window.openTipsterHistory = function(name) {
       <div class="th-stat"><span class="th-stat-label">P/L</span><span class="th-stat-value ${pl >= 0 ? 'pos' : 'neg'}">${stake > 0 ? (pl >= 0 ? '+' : '') + COP(pl) : '—'}</span></div>
       <div class="th-stat"><span class="th-stat-label">ROI</span><span class="th-stat-value ${roi != null && roi >= 0 ? 'pos' : 'neg'}">${roi == null ? '—' : (roi >= 0 ? '+' : '') + roi.toFixed(1) + '%'}</span></div>
     </div>
-    ${renderBetsTable(bets)}`
+    ${renderBetsTable(bets, false, false, _arch)}`
   document.getElementById('tipster-history-modal').style.display = 'flex'
 }
 window.closeTipsterHistory = function(e) {
@@ -2956,6 +2985,281 @@ async function syncTipsterLinksFromCloud(force) {
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) syncTipsterLinksFromCloud() })
 // ── /TIPSTER LINKS CLOUD SYNC ─────────────────────────────────────────────────
+// ═══ TIPSTER ARCHIVE (2026-11-16) ═══════════════════════════════════════════════
+// Retire a tipster without touching a single bet. Status lives in Supabase table
+// `tipster_archive` (tracker, name, archived boolean, archived_at) and is cached in
+// localStorage so every device agrees and the page still paints offline.
+//   • activeBets()            → allBets minus archived tipsters (dashboard, rankings, daily perf…)
+//   • isArchivedTipster(name) → case/space-insensitive
+//   • setTipsterArchived()    → archive / unarchive (fully reversible; bets are never written)
+const TA_STORAGE = 'nfl_tipsterArchive'         // { name: { archived, archived_at } }
+const TA_DIRTY   = 'nfl_tipsterArchive_dirty'   // [name, …] local changes not yet in the cloud
+const TA_TABLE   = 'tipster_archive'
+let _taMap = null, _taKeys = null, _taLastPull = 0, _taBusy = false
+function loadTipsterArchive() {
+  if (_taMap) return _taMap
+  try {
+    const o = JSON.parse(localStorage.getItem(TA_STORAGE) || '{}')
+    _taMap = (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}
+  } catch { _taMap = {} }
+  return _taMap
+}
+function saveTipsterArchiveLocal(map) {
+  _taMap = map; _taKeys = null
+  try { localStorage.setItem(TA_STORAGE, JSON.stringify(map)) } catch {}
+  if (typeof tipsterPerfInvalidate === 'function') tipsterPerfInvalidate()
+}
+function taDirtyList() { try { const a = JSON.parse(localStorage.getItem(TA_DIRTY) || '[]'); return Array.isArray(a) ? a : [] } catch { return [] } }
+function taSetDirty(list) { try { list.length ? localStorage.setItem(TA_DIRTY, JSON.stringify([...new Set(list)])) : localStorage.removeItem(TA_DIRTY) } catch {} }
+function taKeySet() {
+  if (_taKeys) return _taKeys
+  _taKeys = new Set()
+  for (const [n, v] of Object.entries(loadTipsterArchive())) if (v && v.archived) _taKeys.add((n || '').trim().toLowerCase())
+  return _taKeys
+}
+function isArchivedTipster(name) {
+  const k = (name || '').trim().toLowerCase()
+  return !!k && taKeySet().has(k)
+}
+function archivedTipsterNames() {
+  return Object.entries(loadTipsterArchive()).filter(([, v]) => v && v.archived).map(([n]) => n)
+    .sort((a, b) => a.localeCompare(b))
+}
+function archivedAtFor(name) {
+  const k = (name || '').trim().toLowerCase()
+  for (const [n, v] of Object.entries(loadTipsterArchive())) {
+    if (v && v.archived && (n || '').trim().toLowerCase() === k) return v.archived_at || null
+  }
+  return null
+}
+function fmtArchDate(iso) {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (isNaN(d)) return '—'
+  return d.toLocaleDateString('es-CO', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+// Every "current" view reads bets through this instead of allBets.
+function activeBets() {
+  if (!taKeySet().size) return allBets.slice()
+  return allBets.filter(b => !isArchivedTipster(b.tipster))
+}
+function archivedBets() { return allBets.filter(b => isArchivedTipster(b.tipster)) }
+
+async function pushTipsterArchiveDirty() {
+  if (!SUPABASE_CONFIGURED) { taSetDirty([]); return true }
+  const dirty = taDirtyList()
+  if (!dirty.length) return true
+  const map = loadTipsterArchive()
+  const rows = dirty.filter(n => map[n]).map(n => ({
+    tracker: TL_TRACKER, name: n, archived: !!map[n].archived,
+    archived_at: map[n].archived ? (map[n].archived_at || new Date().toISOString()) : null,
+    updated_at: new Date().toISOString(),
+  }))
+  if (rows.length) {
+    const { error } = await supabase.from(TA_TABLE).upsert(rows, { onConflict: 'tracker,name' })
+    if (error) throw error
+  }
+  taSetDirty([])
+  return true
+}
+// Pull the archive list. Returns true when the local copy changed.
+async function syncTipsterArchiveFromCloud(force) {
+  if (!SUPABASE_CONFIGURED || _taBusy) return false
+  if (!force && Date.now() - _taLastPull < 15000) return false
+  _taBusy = true; _taLastPull = Date.now()
+  try {
+    try { await pushTipsterArchiveDirty() } catch (e) { console.warn('[tipster-archive] pending save failed — will retry', e) }
+    const { data, error } = await supabase.from(TA_TABLE).select('name,archived,archived_at').eq('tracker', TL_TRACKER)
+    if (error) throw error
+    const local = loadTipsterArchive(), dirty = taDirtyList(), next = {}
+    ;(data || []).forEach(r => { if (r && r.name) next[r.name] = { archived: !!r.archived, archived_at: r.archived_at || null } })
+    dirty.forEach(n => { if (local[n]) next[n] = local[n] })   // unsent local changes win
+    const canon = o => JSON.stringify(Object.keys(o).sort().map(k => [k, !!o[k].archived, o[k].archived_at || null]))
+    if (canon(next) === canon(local)) return false
+    saveTipsterArchiveLocal(next)
+    return true
+  } catch (e) { console.warn('[tipster-archive] cloud load failed — using this browser\'s copy', e); return false }
+  finally { _taBusy = false }
+}
+// Archive / unarchive. Only the status row is written — never a bet, staged or pending row.
+async function setTipsterArchived(name, archived) {
+  name = (name || '').trim()
+  if (!name) return false
+  const key = name.toLowerCase()
+  const map = { ...loadTipsterArchive() }
+  const touched = []
+  if (archived) {
+    map[name] = { archived: true, archived_at: new Date().toISOString() }
+    touched.push(name)
+  } else {
+    // Clear every spelling variant so the tipster really comes back everywhere.
+    let hit = false
+    Object.keys(map).forEach(n => {
+      if ((n || '').trim().toLowerCase() === key) { map[n] = { archived: false, archived_at: null }; touched.push(n); hit = true }
+    })
+    if (!hit) { map[name] = { archived: false, archived_at: null }; touched.push(name) }
+  }
+  saveTipsterArchiveLocal(map)
+  taSetDirty([...taDirtyList(), ...touched])
+  try { await pushTipsterArchiveDirty(); return true }
+  catch (e) {
+    console.warn('[tipster-archive] cloud save failed', e)
+    toast('Saved on this device only — it will sync when the cloud is reachable', 'error')
+    return false
+  }
+}
+window.archiveTipsterRow = async function(name) {
+  name = (name || '').trim()
+  if (!name) return
+  const n = allBets.filter(b => normTip(b.tipster) === normTip(name)).length
+  if (!confirm(`Archive "${name}"?\n\nTheir ${n} bet(s) stay exactly as they are. "${name}" is hidden from the Dashboard, rankings, Daily Performance and tipster filters, and moves to the 📦 Archived tab.\n\nYou can unarchive at any time.`)) return
+  await setTipsterArchived(name, true)
+  if (filterTipster && isArchivedTipster(filterTipster) && !filterShowArchived) filterTipster = ''
+  populateTipsterSelect()
+  toast(`📦 "${name}" archived`, 'success')
+  showPage(currentPage)
+}
+window.unarchiveTipster = async function(name) {
+  name = (name || '').trim()
+  if (!name) return
+  if (!confirm(`Unarchive "${name}"?\n\nThey return to the Dashboard, rankings, Tipsters tab and filters with all their bets.`)) return
+  await setTipsterArchived(name, false)
+  addTipster(name)            // back in the roster / dropdowns on this device
+  populateTipsterSelect()
+  toast(`"${name}" restored`, 'success')
+  showPage(currentPage)
+}
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden) return
+  const changed = await syncTipsterArchiveFromCloud()
+  if (!changed) return
+  try {
+    const modalOpen = [...document.querySelectorAll('.modal-overlay')].some(m => m.style.display !== 'none')
+    if (!modalOpen && !['staged', 'import'].includes(currentPage)) showPage(currentPage)
+  } catch {}
+})
+
+// ── Archived Tipsters page ──
+let archIncludeActive = false, archSortKey = 'pl', archSortDir = -1
+window.setArchIncludeActive = function(v) { archIncludeActive = !!v; showPage('archived') }
+window.setArchSort = function(key) {
+  if (archSortKey === key) archSortDir = -archSortDir
+  else { archSortKey = key; archSortDir = (key === 'name' || key === 'archivedAt') ? 1 : -1 }
+  showPage('archived')
+}
+function archRowsFor(pool) {
+  const c = tipsterPerfCompute(pool)
+  const rows = Object.keys(c.stats).map(n => {
+    const s = c.stats[n]
+    const dec = s.won + s.lost, legDec = s.legWon + s.legLost
+    const archived = isArchivedTipster(n)
+    return {
+      name: n, archived, archivedAt: archived ? archivedAtFor(n) : null,
+      bets: s.bets, pending: s.pending, voids: s.voids, won: s.won, lost: s.lost,
+      winPct: dec > 0 ? s.won / dec * 100 : null,
+      legWon: s.legWon, legLost: s.legLost,
+      pickPct: legDec > 0 ? s.legWon / legDec * 100 : null,
+      stake: s.stake, pl: s.stake > 0 ? s.pl : null,
+      roi: s.stake > 0 ? s.pl / s.stake * 100 : null,
+      avgOdds: s.oddsN > 0 ? s.oddsSum / s.oddsN : null,
+    }
+  })
+  // Archived tipsters with no bets still get a row (so they can be unarchived).
+  const have = new Set(rows.map(r => normTip(r.name)))
+  archivedTipsterNames().forEach(n => {
+    if (have.has(normTip(n))) return
+    rows.push({ name: n, archived: true, archivedAt: archivedAtFor(n), bets: 0, pending: 0, voids: 0, won: 0, lost: 0, winPct: null,
+      legWon: 0, legLost: 0, pickPct: null, stake: 0, pl: null, roi: null, avgOdds: null })
+  })
+  return rows
+}
+function renderArchivedPage() {
+  const archNames = archivedTipsterNames()
+  const archBetsArr = archivedBets()
+  const pool = archIncludeActive ? allBets : archBetsArr
+  let rows = archRowsFor(pool)
+  if (!archIncludeActive) rows = rows.filter(r => r.archived)
+
+  const k = archSortKey, dir = archSortDir
+  rows.sort((a, b) => {
+    if (k === 'name') return a.name.localeCompare(b.name) * dir
+    const av = k === 'archivedAt' ? (a.archivedAt ? Date.parse(a.archivedAt) : null) : a[k]
+    const bv = k === 'archivedAt' ? (b.archivedAt ? Date.parse(b.archivedAt) : null) : b[k]
+    if (av == null && bv == null) return a.name.localeCompare(b.name)
+    if (av == null) return 1          // no data → always last
+    if (bv == null) return -1
+    return (av - bv) * dir || a.name.localeCompare(b.name)
+  })
+
+  // KPIs for the archived group only.
+  const settledMoney = archBetsArr.filter(b => b.result !== null && b.result !== undefined && !isTrackingBet(b))
+  const gStake = settledMoney.reduce((s, b) => s + Number(b.stake_cop || 0), 0)
+  const gPL    = settledMoney.reduce((s, b) => s + Number(b.pl_cop || 0), 0)
+  const gROI   = gStake > 0 ? gPL / gStake * 100 : null
+
+  const dash = '<span style="color:var(--gray-400)">—</span>'
+  const pct  = v => v == null ? dash : Math.round(v) + '%'
+  const th = (key, label, title) => `<th class="sortable" onclick="setArchSort('${key}')" title="${title || 'Sort by ' + label}">${label}${archSortKey === key ? (archSortDir < 0 ? ' ▼' : ' ▲') : ''}</th>`
+
+  const body = rows.length === 0
+    ? `<tr><td colspan="14" style="text-align:center;color:var(--gray-400);padding:40px;white-space:normal;">
+         No archived tipsters. Use the <strong>📦</strong> button on a tipster in the <span class="arch-link" onclick="showPage('tipsters')">Tipsters</span> tab to archive one.</td></tr>`
+    : rows.map((r, i) => {
+        const esc = escapeHtml(r.name)
+        const plCell = r.pl == null ? dash : `<span class="${r.pl >= 0 ? 'pl-pos' : 'pl-neg'}">${r.pl >= 0 ? '+' : ''}${COP(r.pl)}</span>`
+        const roiCell = r.roi == null ? dash : `<span class="${r.roi >= 0 ? 'pl-pos' : 'pl-neg'}">${r.roi >= 0 ? '+' : ''}${r.roi.toFixed(1)}%</span>`
+        const status = r.archived ? '<span class="arch-tag">📦 archived</span>' : '<span class="arch-tag active">active</span>'
+        const c = tipsterColor(r.name)
+        const nameCell = `<span class="tipster-pill" data-tipster="${esc}" onclick="openTipsterHistory(this.dataset.tipster)" title="Open ${esc}'s full bet history${r.archived ? ' (read-only)' : ''}" style="background:${c.bg};color:${c.fg};border-color:${c.border};">${esc}</span>`
+        const action = r.archived
+          ? `<button class="btn-unarchive" data-tipster="${esc}" onclick="unarchiveTipster(this.dataset.tipster)" title="Restore ${esc} to every view">↩ Unarchive</button>`
+          : `<button class="btn-archive" data-tipster="${esc}" onclick="archiveTipsterRow(this.dataset.tipster)" title="Archive ${esc}">📦 Archive</button>`
+        return `<tr class="${r.archived ? '' : 'is-active'}">
+          <td><span class="tip-rank-cell">#${i + 1}</span></td>
+          <td>${nameCell}</td>
+          <td>${status}</td>
+          <td>${r.bets}${r.pending ? ` <span style="color:var(--gray-400);font-size:9.5px">(${r.pending} pend)</span>` : ''}</td>
+          <td>${(r.won + r.lost) > 0 ? `${r.won}W · ${r.lost}L` : dash}</td>
+          <td>${pct(r.winPct)}</td>
+          <td>${(r.legWon + r.legLost) > 0 ? `${r.legWon}W · ${r.legLost}L` : dash}</td>
+          <td>${pct(r.pickPct)}</td>
+          <td>${r.stake > 0 ? COP(r.stake) : dash}</td>
+          <td>${plCell}</td>
+          <td>${roiCell}</td>
+          <td>${r.avgOdds == null ? dash : r.avgOdds.toFixed(2)}</td>
+          <td>${r.archived ? fmtArchDate(r.archivedAt) : dash}</td>
+          <td>${action}</td>
+        </tr>`
+      }).join('')
+
+  const sortLabel = { name: 'name', bets: 'bets', winPct: 'win % (bets)', pickPct: 'win % (picks)', stake: 'staked', pl: 'P/L', roi: 'ROI', avgOdds: 'avg odds', archivedAt: 'archive date' }[archSortKey] || archSortKey
+  return `
+    <div class="section-title">📦 Archived Tipsters${archNames.length ? ` <span class="section-counter">${archNames.length}</span>` : ''}</div>
+    <div style="color:var(--gray-600); font-size:12px; margin-bottom:14px; max-width:780px; line-height:1.5;">
+      Retired tipsters. Their bets, parlay legs and results are kept untouched — they are only left out of the Dashboard, rankings, Daily Performance and tipster filters. Click a name for the full read-only history.
+    </div>
+    <div class="kpi-grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); max-width:760px; margin-bottom:16px;">
+      <div class="kpi-card"><div class="kpi-label">Archived</div><div class="kpi-value">${archNames.length}</div><div class="kpi-sub">tipsters</div></div>
+      <div class="kpi-card"><div class="kpi-label">Their bets</div><div class="kpi-value">${archBetsArr.length}</div><div class="kpi-sub">all kept</div></div>
+      <div class="kpi-card"><div class="kpi-label">Staked</div><div class="kpi-value blue">${COP(gStake)}</div><div class="kpi-sub">${settledMoney.length} money bets</div></div>
+      <div class="kpi-card"><div class="kpi-label">Net P/L</div><div class="kpi-value ${gPL >= 0 ? 'green' : 'red'}">${gPL >= 0 ? '+' : ''}${COP(gPL)}</div><div class="kpi-sub">settled money bets</div></div>
+      <div class="kpi-card"><div class="kpi-label">ROI</div><div class="kpi-value ${gROI == null ? '' : gROI >= 0 ? 'green' : 'red'}">${gROI == null ? '—' : (gROI >= 0 ? '+' : '') + gROI.toFixed(1) + '%'}</div><div class="kpi-sub">return on stake</div></div>
+    </div>
+    <div class="arch-toolbar">
+      <label title="Rank archived tipsters side by side with the active ones"><input type="checkbox" ${archIncludeActive ? 'checked' : ''} onchange="setArchIncludeActive(this.checked)" /> Include active tipsters (compare)</label>
+      <span style="color:var(--gray-400); font-size:11px;">Sorted by ${sortLabel} · click a column header to re-rank · # is the position in the current sort</span>
+    </div>
+    <div class="arch-table-wrap">
+    <table class="tipsters-table arch-table">
+      <thead><tr>
+        <th>#</th>${th('name', 'Name')}<th>Status</th>${th('bets', 'Bets')}<th>W/L (bets)</th>${th('winPct', 'Win % (bets)', 'Won bets / decided bets — a parlay counts once')}<th>W/L (picks)</th>${th('pickPct', 'Win % (picks)', 'Every parlay leg counts')}${th('stake', 'Staked', 'Stake on settled money bets')}${th('pl', 'P/L')}${th('roi', 'ROI')}${th('avgOdds', 'Avg odds', 'Average decimal odds of their bets')}${th('archivedAt', 'Archived on')}<th></th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+    </div>`
+}
+// ═══ /TIPSTER ARCHIVE ═══════════════════════════════════════════════════════════
+
 // Returns the saved links for a tipster as an array of length 0, 1, or 2.
 // Preserves empty-string slots (so a freshly-added second slot stays visible).
 // Backward compatible with older { name: 'url' } string entries.
@@ -3007,10 +3311,26 @@ function removeTipster(name) {
   Object.keys(links).forEach(k => { if (normTip(k) === key) delete links[k] })
   saveTipsterLinks(links)
 }
-function allTipsterNames() {
+// TIPSTER ARCHIVE: archived tipsters are left out unless includeArchived is true.
+function allTipsterNames(includeArchived = false) {
   const set = new Set(loadTipsters())
   allBets.forEach(b => { if (b.tipster) set.add(b.tipster) })
-  return [...set].sort((a, b) => a.localeCompare(b))
+  let names = [...set]
+  if (!includeArchived) names = names.filter(n => !isArchivedTipster(n))
+  return names.sort((a, b) => a.localeCompare(b))
+}
+// Keeps a bet's own tipster selectable (e.g. editing a bet by an archived tipster)
+// so opening + saving the form can never silently reassign it.
+function ensureTipsterOption(name) {
+  const sel = document.getElementById('f-tipster')
+  if (!sel || !name) return
+  if (![...sel.options].some(o => o.value === name)) {
+    const o = document.createElement('option')
+    o.value = name
+    o.textContent = name + (isArchivedTipster(name) ? ' (archived)' : '')
+    sel.appendChild(o)
+  }
+  sel.value = name
 }
 function populateTipsterSelect() {
   const select = document.getElementById('f-tipster')
@@ -3067,8 +3387,7 @@ window.promptNewTipster = function() {
     showUrl: false,
     callback(name) {
       addTipster(name)
-      const sel = document.getElementById('f-tipster')
-      if (sel) sel.value = name
+      ensureTipsterOption(name)
       toast(`Tipster "${name}" added`, 'success')
     }
   })
@@ -3082,6 +3401,8 @@ async function init() {
   await loadBets()
   await loadStagedBets()
   seedDefaultTipstersOnce()
+  // TIPSTER ARCHIVE (2026-11-16): know who is archived before the first paint (4 s cap, cached copy otherwise)
+  try { await Promise.race([syncTipsterArchiveFromCloud(true), new Promise(r => setTimeout(r, 4000))]) } catch {}
   syncTipsterLinksFromCloud(true)   // TIPSTER LINKS CLOUD SYNC (2026-11-12)
   populateTipsterSelect()
   refreshStagedBadge()
@@ -3091,7 +3412,7 @@ async function init() {
   let startPage = 'dashboard'
   try {
     const saved = sessionStorage.getItem(PAGE_SESSION_KEY)
-    if (saved && ['dashboard','bets','pending','live','tipsters','import','staged'].includes(saved)) startPage = saved
+    if (saved && ['dashboard','bets','pending','live','tipsters','archived','import','staged'].includes(saved)) startPage = saved
   } catch {}
   showPage(startPage)
   if (!SUPABASE_CONFIGURED) showLocalOnlyBanner()
@@ -3181,6 +3502,7 @@ window.showPage = function(page) {
   else if (page === 'pending')   content.innerHTML = renderPendingPage()
   else if (page === 'live')      content.innerHTML = renderLivePage()
   else if (page === 'tipsters')  content.innerHTML = renderTipstersPage()
+  else if (page === 'archived')  content.innerHTML = renderArchivedPage()
   else if (page === 'import')    { content.innerHTML = renderImportPage(); wireImportPage() }
   else if (page === 'staged')    content.innerHTML = renderStagedPage()
   refreshStagedBadge()
@@ -3325,8 +3647,9 @@ function dpDayCard(day) {
 // the rest of the dashboard.
 function renderDailyPerformance(days) {
   const N = days || 7
+  const _bets = activeBets()   // TIPSTER ARCHIVE: archived tipsters excluded
   const seen = new Set()
-  allBets.forEach(b => { if (b && b.date) seen.add(b.date) })
+  _bets.forEach(b => { if (b && b.date) seen.add(b.date) })
   const dayDates = [...seen].sort().reverse().slice(0, N)
 
   if (dayDates.length === 0) {
@@ -3341,7 +3664,7 @@ function renderDailyPerformance(days) {
   }
 
   const dayList = dayDates.map(date => {
-    const dayBets = allBets.filter(b => b.date === date)
+    const dayBets = _bets.filter(b => b.date === date)
     const settledMoney = dayBets.filter(b => b.result !== null && !isTrackingBet(b))
     const wins    = dayBets.filter(b => b.result === 1).length
     const losses  = dayBets.filter(b => b.result === 0).length
@@ -3383,12 +3706,16 @@ function renderDailyPerformance(days) {
 
 // ── DASHBOARD ─────────────────────────────────────────────────────
 function renderDashboard() {
-  const settled = allBets.filter(b => b.result !== null)
+  // TIPSTER ARCHIVE (2026-11-16): every total below is computed without archived tipsters.
+  const _bets   = activeBets()
+  const _archN  = archivedTipsterNames().length
+  const _archBetsN = allBets.length - _bets.length
+  const settled = _bets.filter(b => b.result !== null)
   const money   = settled.filter(b => !isTrackingBet(b))
-  const won     = allBets.filter(b => b.result === 1)
-  const lost    = allBets.filter(b => b.result === 0)
-  const pending = allBets.filter(b => b.result === null)
-  const trackingCount = allBets.filter(isTrackingBet).length
+  const won     = _bets.filter(b => b.result === 1)
+  const lost    = _bets.filter(b => b.result === 0)
+  const pending = _bets.filter(b => b.result === null)
+  const trackingCount = _bets.filter(isTrackingBet).length
 
   const totalStake   = money.reduce((s, b) => s + Number(b.stake_cop), 0)
   const totalPL      = money.reduce((s, b) => s + Number(b.pl_cop || 0), 0)
@@ -3396,7 +3723,7 @@ function renderDashboard() {
   // Win-rate counts INDIVIDUAL LEGS for parlays (using leg_results) so a 2W/1L
   // parlay shows 2 wins + 1 loss instead of just one parlay-level loss. Singles
   // and parlays without leg_results fall back to the bet-level result.
-  const legRecord    = computeLegLevelRecord(allBets)
+  const legRecord    = computeLegLevelRecord(_bets)
   const winRate      = (legRecord.wins + legRecord.losses) > 0
                           ? (legRecord.wins / (legRecord.wins + legRecord.losses) * 100)
                           : 0
@@ -3442,10 +3769,11 @@ function renderDashboard() {
     </div>
     <div class="kpi-card">
       <div class="kpi-label">Total Bets</div>
-      <div class="kpi-value">${allBets.length}</div>
+      <div class="kpi-value">${_bets.length}</div>
       <div class="kpi-sub">all time</div>
     </div>
   </div>
+  ${_archN ? `<div class="arch-note">📦 ${_archN} archived tipster${_archN === 1 ? '' : 's'} (${_archBetsN} bet${_archBetsN === 1 ? '' : 's'}) left out of every number on this page · <a onclick="showPage('archived')">view archived</a></div>` : ''}
 
   <div class="breakdown-grid">
     ${renderTipsterBreakdown()}
@@ -3502,7 +3830,7 @@ function breakdownIcon(color) {
 
 function renderBreakdown(title, field, color) {
   const groups = {}
-  allBets.forEach(b => {
+  activeBets().forEach(b => {
     const key = b[field] || 'Unknown'
     if (!groups[key]) groups[key] = { bets:0, pending:0, pl:0, stake:0, items:[] }
     groups[key].bets++
@@ -3566,7 +3894,7 @@ function renderBreakdown(title, field, color) {
 //   already settled, mirroring the rest of the dashboard's math.
 function renderTipsterBreakdown() {
   const groups = {}
-  allBets.forEach(b => {
+  activeBets().forEach(b => {
     const key = b.tipster || 'Unknown'
     if (!groups[key]) groups[key] = {
       bets:0, picks:0, won:0, settled:0, pending:0, pl:0, stake:0,
@@ -3698,7 +4026,10 @@ function renderTipsterBreakdown() {
 
 // ── BETS PAGE ─────────────────────────────────────────────────────
 function renderBetsPage() {
-  let filtered = [...allBets]
+  // TIPSTER ARCHIVE: archived tipsters' bets are hidden unless "Show archived" is ticked.
+  const _archHidden = allBets.length - activeBets().length
+  if (filterTipster && !filterShowArchived && isArchivedTipster(filterTipster)) filterTipster = ''
+  let filtered = filterShowArchived ? [...allBets] : activeBets()
   if (filterRegion) filtered = filtered.filter(b => b.region === filterRegion)
   if (filterResult === 'won')     filtered = filtered.filter(b => b.result === 1)
   else if (filterResult === 'lost')    filtered = filtered.filter(b => b.result === 0)
@@ -3757,8 +4088,9 @@ function renderBetsPage() {
     </select>
     <select class="filter-select" onchange="window._filterTipster(this.value)" title="Filter by tipster (type to find or pick from the list)">
       <option value="">All Tipsters</option>
-      ${allTipsterNames().map(t => `<option value="${escapeHtml(t)}" ${filterTipster===t?'selected':''}>${escapeHtml(t)}</option>`).join('')}
+      ${allTipsterNames(filterShowArchived).map(t => `<option value="${escapeHtml(t)}" ${filterTipster===t?'selected':''}>${escapeHtml(t)}${isArchivedTipster(t) ? ' (archived)' : ''}</option>`).join('')}
     </select>
+    ${(_archHidden || filterShowArchived) ? `<label class="form-check" style="margin:0; font-size:11.5px; white-space:nowrap;" title="Archived tipsters and their bets are hidden by default"><input type="checkbox" ${filterShowArchived ? 'checked' : ''} onchange="window._toggleShowArchived(this.checked)" /> <span>📦 Show archived (${_archHidden} bet${_archHidden === 1 ? '' : 's'})</span></label>` : ''}
     <span class="filter-count">${filtered.length} bet${filtered.length !== 1 ? 's' : ''}</span>
   </div>
   ${renderBetsTable(filtered, true, true)}
@@ -4126,7 +4458,7 @@ function renderLiveBetItem(b, matchKey) {
 }
 
 // ── BETS TABLE ────────────────────────────────────────────────────
-function renderBetsTable(bets, showSettle = false, sortable = false) {
+function renderBetsTable(bets, showSettle = false, sortable = false, readOnly = false) {
   // ── PICKS FEED — card-per-bet layout (v4). Same name/signature as the old
   //    table renderer so every call site keeps working unchanged.
   if (bets.length === 0) return `
@@ -4167,7 +4499,7 @@ function renderBetsTable(bets, showSettle = false, sortable = false) {
                      : lr === 0 ? `<span class="feed-leg-mark lost">✗</span>`
                      : lr === 2 ? `<span class="feed-leg-mark void">V</span>`
                      : `<span class="feed-leg-mark tbd">·</span>`
-          const quick = pendingBet ? legQuickButtonsHtml(b, i) : ''
+          const quick = (pendingBet && !readOnly) ? legQuickButtonsHtml(b, i) : ''
           return `<div class="feed-match-row">
             <div class="feed-match-main">
               ${mark}
@@ -4201,7 +4533,9 @@ function renderBetsTable(bets, showSettle = false, sortable = false) {
       ? `${escapeHtml(b.match_name)}${tracking ? '' : ` @ ${Number(b.odds).toFixed(2)}`}`
       : `${escapeHtml(b.pick)}${tracking ? '' : ` @ ${Number(b.odds).toFixed(2)}`}`
     const unitLine = tracking ? 'Call only' : `Unit ${Number(b.units || 0)}`
-    const rightHtml = b.result === 1
+    const rightHtml = readOnly
+      ? `<span class="feed-result-tag ${b.result === 1 ? 'won' : b.result === 0 ? 'lost' : ''}" style="cursor:default">${b.result === 1 ? 'WIN' : b.result === 0 ? 'LOSS' : b.result === null || b.result === undefined ? 'PENDING' : 'VOID'}</span><span class="feed-unit">${unitLine}</span>`
+      : b.result === 1
       ? `<button class="feed-result-tag won" onclick="openSettleModal(${b.id})" title="Adjust result">WIN</button><span class="feed-unit">${unitLine}</span>`
       : b.result === 0
         ? `<button class="feed-result-tag lost" onclick="openSettleModal(${b.id})" title="Adjust result">LOSS</button><span class="feed-unit">${unitLine}</span>`
@@ -4228,10 +4562,10 @@ function renderBetsTable(bets, showSettle = false, sortable = false) {
       : `Stake ${COP(b.stake_cop)} · To win ${COP(b.potential_cop)}`
     const footHtml = `<div class="feed-foot">
         <span>${stakePart}${plPart}</span>
-        <span class="feed-foot-actions">
+        ${readOnly ? '<span class="feed-readonly">read-only</span>' : `<span class="feed-foot-actions">
           <button class="btn-edit" onclick="openEditModal(${b.id})" title="Edit bet">✏️</button>
           <button class="btn-delete" onclick="deleteBet(${b.id})" title="Delete bet">🗑</button>
-        </span>
+        </span>`}
       </div>`
 
     return `<div class="feed-card" data-bet-id="${b.id}">
@@ -4315,7 +4649,7 @@ window.openEditModal = function(id) {
   if (b.tipster) {
     addTipster(b.tipster)
     populateTipsterSelect()
-    document.getElementById('f-tipster').value = b.tipster
+    ensureTipsterOption(b.tipster)
   }
 
   if (isParlayPick(b.pick)) {
@@ -4736,7 +5070,7 @@ function applyPrefill(b) {
   if (b.tipster) {
     addTipster(b.tipster)
     populateTipsterSelect()
-    document.getElementById('f-tipster').value = b.tipster
+    ensureTipsterOption(b.tipster)
   }
   if (!looksTracking && b.bet_type &&
       [...document.getElementById('f-bet-type').options].some(o => o.value === b.bet_type)) {
@@ -5195,6 +5529,7 @@ window._filterRegion  = v => { filterRegion  = v; showPage('bets') }
 window._filterResult  = v => { filterResult  = v; showPage('bets') }
 window._filterCompType= v => { filterCompType= v; showPage('bets') }
 window._filterTipster = v => { filterTipster = v; showPage('bets') }
+window._toggleShowArchived = v => { filterShowArchived = !!v; if (!filterShowArchived && isArchivedTipster(filterTipster)) filterTipster = ''; showPage('bets') }
 // Click a sortable header to sort the All Bets table. Clicking the active
 // column toggles asc/desc; clicking a new column sorts ascending.
 window._sortBets = function(key) {
@@ -5209,8 +5544,8 @@ window._sortBets = function(key) {
 function computeTipsterStats() {
   const stats = {}
   const ensure = n => (stats[n] = stats[n] || { bets:0, pending:0, pl:0, stake:0, items:[] })
-  allTipsterNames().forEach(ensure)
-  allBets.forEach(b => {
+  allTipsterNames().forEach(ensure)          // TIPSTER ARCHIVE: active tipsters only
+  activeBets().forEach(b => {
     const name = (b.tipster || '').trim()
     if (!name) return
     const s = ensure(name)
@@ -5274,6 +5609,7 @@ function renderTipstersPage() {
         <td>${plCell}</td>
         <td>
           <div class="tipsters-actions">
+            <button class="btn-archive" data-tipster="${escapeHtml(name)}" onclick="archiveTipsterRow(this.dataset.tipster)" title="Archive tipster — hides them from current views, keeps every bet (reversible)">📦</button>
             <button class="btn-edit" data-tipster="${escapeHtml(name)}" onclick="renameTipsterOnPage(this.dataset.tipster)" title="Rename tipster (updates all their bets)">✏️</button>
             <button class="btn-delete" data-tipster="${escapeHtml(name)}" onclick="deleteTipsterRow(this.dataset.tipster)" title="Remove from list">🗑</button>
           </div>
@@ -5285,7 +5621,8 @@ function renderTipstersPage() {
     <div class="section-title">👥 Tipsters</div>
     <div style="display:flex; gap:10px; margin-bottom:14px; align-items:center;">
       <button class="btn btn-primary" onclick="promptNewTipsterOnPage()">+ Add Tipster</button>
-      <span style="font-size:11px; color:var(--gray-400);">Links saved locally in this browser · ✏️ rename updates every bet by that tipster (rename onto an existing name to merge) · 🗑 delete keeps the bets but clears their tipster (they become "No tipster")</span>
+      ${archivedTipsterNames().length ? `<button class="btn btn-secondary" style="white-space:nowrap" onclick="showPage('archived')" title="Archived tipsters are not ranked here">📦 Archived (${archivedTipsterNames().length})</button>` : ''}
+      <span style="font-size:11px; color:var(--gray-400);">Links saved locally in this browser · ✏️ rename updates every bet by that tipster (rename onto an existing name to merge) · 🗑 delete keeps the bets but clears their tipster (they become "No tipster") · 📦 archive hides a tipster from current views and keeps everything (reversible)</span>
     </div>
     <table class="tipsters-table">
       <thead><tr>
@@ -5498,7 +5835,7 @@ async function applyTipsterRename(oldName, newName) {
   // "AustinProps") are caught too — otherwise a stray variant survives the
   // rename and the old name reappears on the page.
   const affected = allBets.filter(b => normTip(b.tipster) === oldKey)
-  const isMerge = allTipsterNames().some(n => normTip(n) !== oldKey && normTip(n) === newKey)
+  const isMerge = allTipsterNames(true).some(n => normTip(n) !== oldKey && normTip(n) === newKey)
   const msg = isMerge
     ? `A tipster named "${newName}" already exists.\n\nRenaming will MERGE them: all ${affected.length} bet(s) currently under "${oldName}" will be reassigned to "${newName}", and the two will show as one from now on.\n\nContinue?`
     : `Rename "${oldName}" → "${newName}"?\n\nThis updates ${affected.length} bet(s) associated with this tipster, plus the dropdown and saved links.`
@@ -7160,6 +7497,9 @@ function renderExtractedBets(bets, comments, banners = []) {
     const srcLabel = b.source_image ? `📷 #${b.source_image} · ` : ''
     const needsInfo = b._parse_path === 'needs_info'
     const incomplete = !cardIsComplete(b)
+    const archTip = isArchivedTipster(b.tipster)          // TIPSTER ARCHIVE
+    const archBlocked = archivedBlocked(b)
+    const archChip = archTip ? `<span class="extract-badge" style="background:#fef3c7;color:#92400e;" title="${escapeHtml(b.tipster || '')} is archived — this card is not staged unless you override it">📦 Archived tipster${b._archOk ? ' · override' : ''}</span>` : ''
     const pathChip = needsInfo
       ? `<span class="extract-badge" style="background:#fee2e2;color:#991b1b;" title="${escapeHtml((b._errors || []).join('; '))}">⚠ Needs info</span>`
       : b._parse_path === 'ai'
@@ -7172,7 +7512,7 @@ function renderExtractedBets(bets, comments, banners = []) {
                   : dup === 'saved' ? `<span class="extract-badge" style="background:#fee2e2;color:#991b1b;" title="Same tipster + date + match + pick is already saved in your bets">⚠ Already saved</span>` : ''
     const badge = (isPar
       ? `<span class="extract-badge parlay">🎯 Parlay · ${b.legs.length} legs</span>`
-      : `<span class="extract-badge single">Single</span>`) + trackingChip + resultChip(b.result) + pathChip + warnChip + dupChip
+      : `<span class="extract-badge single">Single</span>`) + trackingChip + resultChip(b.result) + pathChip + warnChip + dupChip + archChip
     const legsHtml = isPar
       ? `<div style="margin-top:8px;">
            ${b.legs.map((l, j) => {
@@ -7193,7 +7533,7 @@ function renderExtractedBets(bets, comments, banners = []) {
       : ''
     const cid = escapeHtml(b._cid)
     return `
-    <div class="extract-card" id="extract-card-${cid}" style="${dup ? 'border-color:#fca5a5;' : ''}">
+    <div class="extract-card" id="extract-card-${cid}" style="${dup ? 'border-color:#fca5a5;' : archBlocked ? 'border-color:#fcd34d;' : ''}">
       <div class="extract-card-head">
         <div style="font-family:var(--font-display); font-weight:700; font-size:13.5px;">
           ${srcLabel}${escapeHtml(b.match || 'Unknown match')}
@@ -7222,7 +7562,9 @@ function renderExtractedBets(bets, comments, banners = []) {
         </div>
       </div>` : ''}
       <div class="extract-actions">
-        <button class="btn btn-primary   btn-sm" data-stage-btn onclick="sendExtractedToStaged('${cid}')" ${incomplete ? 'disabled title="Complete tipster, date and picks first"' : ''}>📋 Send to Staged${dup ? ' anyway' : ''}</button>
+        ${archBlocked
+          ? `<button class="btn btn-secondary btn-sm" data-stage-btn onclick="stageArchivedAnyway('${cid}')" ${incomplete ? 'disabled title="Complete tipster, date and picks first"' : 'title="This tipster is archived — click to stage this bet anyway"'}>📦 Archived tipster — stage anyway</button>`
+          : `<button class="btn btn-primary   btn-sm" data-stage-btn onclick="sendExtractedToStaged('${cid}')" ${incomplete ? 'disabled title="Complete tipster, date and picks first"' : ''}>📋 Send to Staged${dup ? ' anyway' : ''}</button>`}
         <button class="btn btn-secondary btn-sm" onclick="useExtractedBet('${cid}')">→ Open in Add Bet form</button>
         <button class="btn btn-secondary btn-sm" onclick="dismissExtractedBet('${cid}')">Dismiss</button>
       </div>
@@ -7233,7 +7575,8 @@ function renderExtractedBets(bets, comments, banners = []) {
     ? `<span style="color:var(--blue); font-weight:600;">📋 ${stagedBets.length} bet${stagedBets.length !== 1 ? 's' : ''} in Staged</span> — fill in final odds/stakes there before confirming.`
     : `Send bets to <strong>Staged</strong> to add real odds/stake after placing at your bookmaker, then confirm to save.`
   const incompleteN = bets.filter(b => !cardIsComplete(b)).length
-  const sendable = bets.filter(b => cardIsComplete(b) && (extractedBatchDuplicatesOk || !b._dup)).length
+  const sendable = bets.filter(b => cardIsComplete(b) && (extractedBatchDuplicatesOk || !b._dup) && !archivedBlocked(b)).length
+  const archBlockedN = bets.filter(b => cardIsComplete(b) && archivedBlocked(b)).length
   const localN = bets.filter(b => b._parse_path === 'local').length
   const aiN = bets.filter(b => b._parse_path === 'ai').length
 
@@ -7251,6 +7594,7 @@ function renderExtractedBets(bets, comments, banners = []) {
       <span>${stagedMsg}</span>
       ${bets.length > 1 ? `<button class="btn btn-primary btn-sm" id="send-all-extracted-btn" data-stage-btn onclick="sendAllExtractedToStaged()" ${sendable ? '' : 'disabled'}>📋 Send all ${sendable} to Staged</button>` : ''}
       ${dupCount ? `<label class="form-check" style="margin:0; font-size:11.5px;"><input type="checkbox" ${extractedBatchDuplicatesOk ? 'checked' : ''} onchange="toggleIncludeDuplicates(this.checked)" /> <span>include ${dupCount} duplicate${dupCount !== 1 ? 's' : ''}</span></label>` : ''}
+      ${archBlockedN ? `<span style="color:#92400e; background:#fef3c7; border:1px solid #fcd34d; border-radius:7px; padding:3px 8px; font-size:11.5px;">📦 ${archBlockedN} card${archBlockedN !== 1 ? 's' : ''} from archived tipsters — not included in "Send all"</span>` : ''}
       ${stagedBets.length ? `<button class="btn btn-secondary btn-sm" onclick="showPage('staged')">Go to Staged →</button>` : ''}
       <button class="btn btn-secondary btn-sm" onclick="clearExtractedBets()" title="Drop all cards">🗑 Clear cards</button>
     </div>
@@ -7368,11 +7712,22 @@ window.aiParseNeedsInfo = async function(cid) {
 
 // Persist a single extracted bet to the staged-bets table, then drop it from
 // the in-memory preview so it doesn't get sent twice.
+// TIPSTER ARCHIVE (2026-11-16): a card whose tipster is archived is held back until overridden.
+function archivedBlocked(b) { return !!b && isArchivedTipster(b.tipster) && !b._archOk }
+window.stageArchivedAnyway = function(cid) {
+  const b = findExtracted(cid)
+  if (!b) return
+  if (!confirm(`"${b.tipster}" is an archived tipster.\n\nStage this bet anyway?`)) return
+  b._archOk = true
+  persistExtractedBets()
+  sendExtractedToStaged(cid)
+}
 window.sendExtractedToStaged = async function(cid) {
   if (stagingInFlight) return
   const b = findExtracted(cid)
   if (!b) return
   if (!cardIsComplete(b)) { toast('Complete tipster, date and picks first (⚠ Needs info)', 'error'); return }
+  if (archivedBlocked(b)) { toast(`"${b.tipster}" is archived — use "stage anyway" on the card to override`, 'error'); return }
   const source = b._extract_source === 'image' ? 'image' : 'text'
   setStageButtonsBusy(true)
   try {
@@ -7397,10 +7752,11 @@ window.sendExtractedToStaged = async function(cid) {
 window.sendAllExtractedToStaged = async function() {
   if (stagingInFlight || !extractedBets.length) return
   const dupIdx = buildDedupeIndex()
-  const targets = extractedBets.filter(b => cardIsComplete(b) && (extractedBatchDuplicatesOk || !findDuplicateFor(b, dupIdx)))
+  const archHeld = extractedBets.filter(b => cardIsComplete(b) && archivedBlocked(b)).length   // TIPSTER ARCHIVE
+  const targets = extractedBets.filter(b => cardIsComplete(b) && !archivedBlocked(b) && (extractedBatchDuplicatesOk || !findDuplicateFor(b, dupIdx)))
   const incompleteN = extractedBets.filter(b => !cardIsComplete(b)).length
-  const skipped = extractedBets.length - targets.length - incompleteN
-  if (!targets.length) { toast(incompleteN ? 'Complete the "⚠ Needs info" cards first' : 'Every card is a duplicate — tick "include duplicates" to send them anyway', 'error'); return }
+  const skipped = extractedBets.length - targets.length - incompleteN - archHeld
+  if (!targets.length) { toast(archHeld && !incompleteN && skipped <= 0 ? 'Only archived-tipster cards are left — use "stage anyway" on each card to override' : incompleteN ? 'Complete the "⚠ Needs info" cards first' : 'Every card is a duplicate — tick "include duplicates" to send them anyway', 'error'); return }
   const total = targets.length
   setStageButtonsBusy(true, `⏳ Staging 0/${total}…`)
   const progress = n => { const el = document.getElementById('send-all-extracted-btn'); if (el) el.textContent = `⏳ Staging ${n}/${total}…` }
@@ -7431,7 +7787,7 @@ window.sendAllExtractedToStaged = async function() {
   refreshStagedBadge()
   setStageButtonsBusy(false)
   renderExtractedBets(extractedBets, currentComments())
-  const skippedMsg = (skipped ? ` · ${skipped} duplicate${skipped !== 1 ? 's' : ''} skipped` : '') + (incompleteN ? ` · ${incompleteN} "needs info" card${incompleteN !== 1 ? 's' : ''} kept` : '')
+  const skippedMsg = (skipped ? ` · ${skipped} duplicate${skipped !== 1 ? 's' : ''} skipped` : '') + (incompleteN ? ` · ${incompleteN} "needs info" card${incompleteN !== 1 ? 's' : ''} kept` : '') + (archHeld ? ` · ${archHeld} archived-tipster card${archHeld !== 1 ? 's' : ''} held back` : '')
   if (failed === 0) toast(`Sent ${okCids.size} bet${okCids.size !== 1 ? 's' : ''} to Staged${skippedMsg}`, 'success')
   else              toast(`Sent ${okCids.size}/${total} — ${failed} failed (${lastErr})${skippedMsg}`, 'error')
 }
@@ -7455,7 +7811,7 @@ function stagedSearchBlob(b) {
 // Distinct, sorted tipster / match values present in the current staged set —
 // used to populate the filter dropdowns.
 function stagedTipsterOptions() {
-  return [...new Set(stagedBets.map(b => b.tipster).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+  return [...new Set(stagedBets.map(b => b.tipster).filter(Boolean))].filter(t => !isArchivedTipster(t)).sort((a, b) => a.localeCompare(b))   // TIPSTER ARCHIVE: hidden by default
 }
 function stagedMatchOptions() {
   return [...new Set(stagedBets.map(b => b.match_name).filter(Boolean))].sort((a, b) => a.localeCompare(b))
@@ -7498,15 +7854,16 @@ function getStagedView() {
 // tipsterPerfInvalidate() is called whenever allBets changes.
 let _tipPerfCache = null, _tipPerfAt = 0
 function tipsterPerfInvalidate() { _tipPerfCache = null }
-function tipsterPerfAll() {
-  const now = Date.now()
-  if (_tipPerfCache && (now - _tipPerfAt) < 1500) return _tipPerfCache
+// TIPSTER ARCHIVE (2026-11-16): the maths now lives in tipsterPerfCompute(bets) so the
+// Archived tab can rank any pool; tipsterPerfAll() ranks ACTIVE tipsters only.
+function tipsterPerfCompute(bets) {
   const stats = {}
-  for (const b of allBets) {
+  for (const b of bets) {
     const n = (b.tipster || '').trim()
     if (!n) continue
-    const s = stats[n] || (stats[n] = { bets: 0, won: 0, lost: 0, voids: 0, pending: 0, settled: 0, stake: 0, pl: 0, legWon: 0, legLost: 0 })
+    const s = stats[n] || (stats[n] = { bets: 0, won: 0, lost: 0, voids: 0, pending: 0, settled: 0, stake: 0, pl: 0, legWon: 0, legLost: 0, oddsSum: 0, oddsN: 0 })
     s.bets++
+    { const o = Number(b.odds); if (o > 1) { s.oddsSum += o; s.oddsN++ } }
     const r = b.result
     const isPar = typeof isParlayPick === 'function' && isParlayPick(b.pick)
     const lr = Array.isArray(b.leg_results) ? b.leg_results : null
@@ -7539,7 +7896,12 @@ function tipsterPerfAll() {
   rankedPL.forEach((n, i) => { rank[n] = i + 1 })
   rankedBet.forEach((n, i) => { rankBet[n] = i + 1 })
   rankedPick.forEach((n, i) => { rankPick[n] = i + 1 })
-  _tipPerfCache = { stats, rank, rankBet, rankPick, rankedCount: rankedPL.length, rankedBetCount: rankedBet.length, rankedPickCount: rankedPick.length }
+  return { stats, rank, rankBet, rankPick, rankedCount: rankedPL.length, rankedBetCount: rankedBet.length, rankedPickCount: rankedPick.length }
+}
+function tipsterPerfAll() {
+  const now = Date.now()
+  if (_tipPerfCache && (now - _tipPerfAt) < 1500) return _tipPerfCache
+  _tipPerfCache = tipsterPerfCompute(activeBets())
   _tipPerfAt = now
   return _tipPerfCache
 }
@@ -7834,7 +8196,10 @@ function renderStagedCard(b) {
   const optList  = (arr, val) => arr.map(o =>
     `<option value="${escapeHtml(o)}" ${val === o ? 'selected' : ''}>${escapeHtml(o)}</option>`
   ).join('')
-  const tipsterOpts   = optEmpty + optList(allTipsterNames(), b.tipster || '')
+  // TIPSTER ARCHIVE: archived names are not offered, but a row that already carries one keeps showing it.
+  const _tipNames     = allTipsterNames()
+  const tipsterOpts   = optEmpty + optList(_tipNames, b.tipster || '')
+    + ((b.tipster && !_tipNames.includes(b.tipster)) ? `<option value="${escapeHtml(b.tipster)}" selected>${escapeHtml(b.tipster)}${isArchivedTipster(b.tipster) ? ' (archived)' : ''}</option>` : '')
   const matchdayOpts  = optEmpty + optList(MATCHDAYS,           b.matchday || '')
   const betTypeOpts   = optEmpty + optList(BET_TYPES,           b.bet_type || '')
   // Split "Home vs Away" into two boxes so they can be edited separately;
@@ -8694,6 +9059,8 @@ window.exportBackupXLSX = function() {
       'Full Pick Text':  b.pick || '',
       'Bet Type':        b.bet_type || '',
       Tipster:           b.tipster || '',
+      'Tipster Archived': isArchivedTipster(b.tipster) ? 'Yes' : 'No',
+      'Archived On':     isArchivedTipster(b.tipster) ? (archivedAtFor(b.tipster) || '').slice(0, 10) : '',
       'Tracking Only':   tracking ? 'Yes' : 'No',
       Odds:              b.odds != null ? Number(b.odds) : '',
       Units:             b.units != null ? Number(b.units) : '',
@@ -8716,6 +9083,7 @@ window.exportBackupXLSX = function() {
         'Parent Match': b.match_name || '',
         Competition:  b.competition || '',
         Tipster:      b.tipster || '',
+        'Tipster Archived': isArchivedTipster(b.tipster) ? 'Yes' : 'No',
         'Leg #':      l.num,
         'Leg Context': l.context || '',
         'Leg Pick':   l.text || '',
@@ -8731,7 +9099,7 @@ window.exportBackupXLSX = function() {
   wsMain['!cols'] = [
     { wch: 6 },  { wch: 11 }, { wch: 26 }, { wch: 18 }, { wch: 14 },
     { wch: 14 }, { wch: 28 }, { wch: 30 }, { wch: 40 }, { wch: 18 },
-    { wch: 14 }, { wch: 13 }, { wch: 7 },  { wch: 7 },  { wch: 13 },
+    { wch: 14 }, { wch: 15 }, { wch: 12 }, { wch: 13 }, { wch: 7 },  { wch: 7 },  { wch: 13 },
     { wch: 14 }, { wch: 13 }, { wch: 9 },  { wch: 40 },
   ]
   XLSX.utils.book_append_sheet(wb, wsMain, 'All Bets')
@@ -8739,7 +9107,7 @@ window.exportBackupXLSX = function() {
   if (legRows.length) {
     const wsLegs = XLSX.utils.json_to_sheet(legRows)
     wsLegs['!cols'] = [
-      { wch: 6 },  { wch: 11 }, { wch: 28 }, { wch: 26 }, { wch: 14 },
+      { wch: 6 },  { wch: 11 }, { wch: 28 }, { wch: 26 }, { wch: 14 }, { wch: 15 },
       { wch: 6 },  { wch: 28 }, { wch: 30 }, { wch: 9 },  { wch: 14 },
     ]
     XLSX.utils.book_append_sheet(wb, wsLegs, 'Parlay Legs')
@@ -8767,9 +9135,49 @@ window.exportBackupXLSX = function() {
     { Metric: 'Net P/L (COP)',    Value: totalPL },
     { Metric: 'ROI %',            Value: Number(roi.toFixed(2)) },
   ]
+  // TIPSTER ARCHIVE (2026-11-16): the backup always carries every bet; these rows show the split.
+  const _archNames = archivedTipsterNames()
+  if (_archNames.length) {
+    const act = activeBets()
+    const actMoney = act.filter(b => b.result !== null && !isTrackingBet(b))
+    const actStake = actMoney.reduce((s, b) => s + Number(b.stake_cop || 0), 0)
+    const actPL    = actMoney.reduce((s, b) => s + Number(b.pl_cop || 0), 0)
+    summaryRows.push(
+      { Metric: 'Archived tipsters', Value: _archNames.join(', ') },
+      { Metric: 'Bets by archived tipsters', Value: allBets.length - act.length },
+      { Metric: 'Active-only: bets', Value: act.length },
+      { Metric: 'Active-only: staked (COP)', Value: actStake },
+      { Metric: 'Active-only: net P/L (COP)', Value: actPL },
+      { Metric: 'Active-only: ROI %', Value: actStake > 0 ? Number((actPL / actStake * 100).toFixed(2)) : 0 },
+    )
+  }
   const wsSum = XLSX.utils.json_to_sheet(summaryRows)
-  wsSum['!cols'] = [{ wch: 22 }, { wch: 22 }]
+  wsSum['!cols'] = [{ wch: 28 }, { wch: 40 }]
   XLSX.utils.book_append_sheet(wb, wsSum, 'Summary')
+
+  if (_archNames.length) {
+    const archSheet = archRowsFor(archivedBets()).filter(r => r.archived)
+      .sort((a, b) => (b.pl ?? -Infinity) - (a.pl ?? -Infinity) || a.name.localeCompare(b.name))
+      .map(r => ({
+        Tipster: r.name,
+        'Archived On': (r.archivedAt || '').slice(0, 10),
+        Bets: r.bets,
+        Pending: r.pending,
+        'Won (bets)': r.won,
+        'Lost (bets)': r.lost,
+        'Win % (bets)': r.winPct == null ? '' : Number(r.winPct.toFixed(1)),
+        'Won (picks)': r.legWon,
+        'Lost (picks)': r.legLost,
+        'Win % (picks)': r.pickPct == null ? '' : Number(r.pickPct.toFixed(1)),
+        'Staked (COP)': r.stake,
+        'P/L (COP)': r.pl == null ? '' : r.pl,
+        'ROI %': r.roi == null ? '' : Number(r.roi.toFixed(2)),
+        'Avg Odds': r.avgOdds == null ? '' : Number(r.avgOdds.toFixed(2)),
+      }))
+    const wsArch = XLSX.utils.json_to_sheet(archSheet)
+    wsArch['!cols'] = [{ wch: 16 }, { wch: 12 }, { wch: 6 }, { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 11 }, { wch: 11 }, { wch: 13 }, { wch: 13 }, { wch: 12 }, { wch: 8 }, { wch: 9 }]
+    XLSX.utils.book_append_sheet(wb, wsArch, 'Archived Tipsters')
+  }
 
   const now = new Date()
   const stamp = now.getFullYear() + '-'
@@ -9044,7 +9452,7 @@ window.closeMoreSheet = function(ev) {
   if (el) el.hidden = true
   // restore the active tab for the page we are on
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'))
-  const t = document.getElementById('tab-' + currentPage) || (['tipsters','import'].includes(currentPage) ? document.getElementById('tab-more') : null)
+  const t = document.getElementById('tab-' + currentPage) || (['tipsters','archived','import'].includes(currentPage) ? document.getElementById('tab-more') : null)
   if (t) t.classList.add('active')
 }
 // Re-read bets + staged bets from Supabase and repaint the current page.
@@ -9060,6 +9468,7 @@ window.refreshFromCloud = async function(silent = true) {
   try {
     await loadBets()
     await loadStagedBets()
+    try { await syncTipsterArchiveFromCloud(true) } catch {}
     lastSyncAt = Date.now()
     refreshStagedBadge()
     if (!modalOpen && !editingPage) {
@@ -9088,7 +9497,7 @@ window.addEventListener('pageshow', (e) => { if (e.persisted) refreshFromCloud(t
   window.showPage = function(page) {
     _showPage(page)
     const more = document.getElementById('tab-more')
-    if (more) more.classList.toggle('active', page === 'tipsters' || page === 'import')
+    if (more) more.classList.toggle('active', page === 'tipsters' || page === 'archived' || page === 'import')
   }
 }
 </script>

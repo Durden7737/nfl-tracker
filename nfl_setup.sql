@@ -202,3 +202,22 @@ alter table public.nfl_staged_bets
   add column if not exists stake_currency text,
   add column if not exists dedupe_key text;
 create index if not exists nfl_staged_bets_dedupe_key_idx on public.nfl_staged_bets (dedupe_key);
+
+-- ═══════════════════════════════════════════════════════════════════
+-- TIPSTER ARCHIVE (2026-11-16) — reversible "archived" flag per tipster.
+-- Shared table (tracker = 'nfl'); no bet row is ever touched. Re-runnable.
+-- ═══════════════════════════════════════════════════════════════════
+create table if not exists public.tipster_archive (
+  tracker     text        not null,
+  name        text        not null,
+  archived    boolean     not null default true,
+  archived_at timestamptz,
+  updated_at  timestamptz not null default now(),
+  primary key (tracker, name)
+);
+alter table public.tipster_archive enable row level security;
+do $$ begin
+  if not exists (select 1 from pg_policies where schemaname='public' and tablename='tipster_archive' and policyname='tipster_archive_anon_all') then
+    create policy tipster_archive_anon_all on public.tipster_archive for all using (true) with check (true);
+  end if;
+end $$;
